@@ -1,0 +1,38 @@
+﻿## .NET / Visual Studio .gitignore
+
+# Build results
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+
+# Others
+*.swp
+*.*~
+project.lock.json
+.DS_Store
+
+# JetBrains Rider
+.idea/
+
+# VS Code
+.vscode/
+
+# Azure / Publish
+[Pp]ublish/
+*.pubxml
+*.publishproj
