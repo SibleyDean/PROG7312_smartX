@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="SmartX.Gateway.Shared/SmartX.Gateway.Shared.csproj" />
+  <Project Path="SmartX.Gateway/SmartX.Gateway.Client/SmartX.Gateway.Client.csproj" />
+  <Project Path="SmartX.Gateway/SmartX.Gateway/SmartX.Gateway.csproj" />
+</Solution>
