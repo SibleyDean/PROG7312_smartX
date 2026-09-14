@@ -1,0 +1,130 @@
+﻿@rendermode InteractiveWebAssembly
+@page "/dashboard"
+@using SmartX.Gateway.Shared.Models
+@using System.Net.Http.Json
+@inject HttpClient Http
+
+<div class="section" style="padding-top: 8rem;">
+    <!-- Header -->
+    <div class="dashboard-header">
+        <div>
+            <div class="section-tag">
+                <span class="tag-line"></span>
+                <span class="mono-label" style="color: var(--accent-lime);">System Interface</span>
+            </div>
+            <h1 style="font-size: 3rem;">Telemetry Dashboard</h1>
+            <p style="margin-top: 0.5rem;">Manage sensor profiles and monitor real-time ingestion.</p>
+        </div>
+        <div class="dashboard-actions">
+            <button class="ghost-button" @onclick="LoadSensors">↻ Refresh</button>
+            <button class="accent-button" @onclick="SeedData">Seed 10 Mock Sensors</button>
+        </div>
+    </div>
+
+    @if (sensors == null)
+    {
+        <div class="state-panel">
+            <p class="loading-text">Loading sensor data...</p>
+        </div>
+    }
+    else if (!sensors.Any())
+    {
+        <div class="state-panel">
+            <p style="margin-bottom: 1rem;">No sensors registered in the system.</p>
+            <button class="accent-button" @onclick="SeedData">Initialize Mock Data</button>
+        </div>
+    }
+    else
+    {
+        <div class="data-grid">
+            <div class="data-grid-header">
+                <span class="mono-label">MAC Address</span>
+                <span class="mono-label">Location</span>
+                <span class="mono-label">Category</span>
+                <span class="mono-label">Telemetry Points</span>
+                <span class="mono-label" style="text-align: right;">Actions</span>
+            </div>
+
+            @foreach (var sensor in sensors)
+            {
+                <div class="data-grid-row">
+                    <span class="data-cell-mac">@sensor.MacAddress</span>
+                    <span style="color: var(--text-secondary); font-size: 0.85rem;">@sensor.Location</span>
+                    <span><span class="category-badge">@sensor.Category</span></span>
+                    <span class="data-cell-value">@sensor.HistoricalTelemetry.Count</span>
+                    <div style="text-align: right;">
+                        <button class="ghost-button" @onclick="() => ViewDetails(sensor.Id)">View</button>
+                    </div>
+                </div>
+            }
+        </div>
+
+        @if (selectedSensor != null)
+        {
+            <div class="detail-panel">
+                <div class="detail-header">
+                    <h3>Details: @selectedSensor.MacAddress</h3>
+                    <button class="detail-close" @onclick="() => selectedSensor = null">✕ Close</button>
+                </div>
+                <span class="mono-label">Recent Telemetry Readings (Last 10)</span>
+                <div class="readings-grid">
+                    @foreach (var reading in selectedSensor.HistoricalTelemetry.OrderByDescending(p => p.Timestamp).Take(10))
+                    {
+                        <div class="reading-card">
+                            <span class="mono-label" style="font-size: 0.6rem;">@reading.Timestamp.ToString("HH:mm:ss")</span>
+                            <span class="reading-value">@reading.Value.ToString("F2")</span>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private List<SensorProfile>? sensors;
+    private SensorProfile? selectedSensor;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadSensors();
+    }
+
+    private async Task LoadSensors()
+    {
+        try
+        {
+            var result = await Http.GetFromJsonAsync<List<SensorProfile>>("api/sensors");
+            if (result != null)
+            {
+                sensors = result;
+                selectedSensor = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading sensors: {ex.Message}");
+        }
+    }
+
+    private async Task SeedData()
+    {
+        try
+        {
+            var response = await Http.PostAsync("api/sensors/seed/10", null);
+            if (response.IsSuccessStatusCode)
+            {
+                await LoadSensors();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error seeding data: {ex.Message}");
+        }
+    }
+
+    private void ViewDetails(Guid sensorId)
+    {
+        selectedSensor = sensors?.FirstOrDefault(s => s.Id == sensorId);
+    }
+}
