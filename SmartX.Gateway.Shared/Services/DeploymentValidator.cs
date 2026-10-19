@@ -18,19 +18,16 @@ public class DeploymentValidator : IDeploymentValidator
     {
         if (root == null) return false;
 
-        // Base case: A leaf node (a specific sensor) is validated.
         if (root.Children.Count == 0)
         {
-            // A leaf is valid if it has a name and zone ID.
             return !string.IsNullOrWhiteSpace(root.NodeName) && !string.IsNullOrWhiteSpace(root.ZoneId);
         }
 
-        // Recursive step: A parent node is valid only if all its children are valid.
         foreach (var child in root.Children)
         {
             if (!ValidateDeploymentTree(child))
             {
-                return false; // Short-circuit on first invalid child.
+                return false;
             }
         }
 

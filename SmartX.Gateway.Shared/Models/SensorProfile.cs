@@ -35,5 +35,5 @@ public class MediaAttachment
     public string ContentType { get; set; } = string.Empty;
     public long FileSize { get; set; }
     public DateTime UploadedAt { get; set; } = DateTime.UtcNow;
-    public byte[] FileData { get; set; } = Array.Empty<byte>(); // For in-memory storage
+    public byte[] FileData { get; set; } = Array.Empty<byte>();
 }
