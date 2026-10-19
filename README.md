@@ -116,8 +116,8 @@ To run from Visual Studio instead, open `SmartX.Gateway.slnx`, set `SmartX.Gatew
 All data is held in memory, so the registry is empty on each start and resets when the server stops.
 
 1. **Seed sensors.** Select **Ingestion** in the navigation bar to open the Telemetry Dashboard, then click **Seed 10 Mock Sensors**. The registry fills with ten devices and the background processor begins generating telemetry.
-2. **Inspect a sensor.** Click **View** on any row to see its details and telemetry history.
+2. **Inspect a sensor.** Click **View** on any row to see its ten most recent readings.
 3. **Open the Command Stream.** Select **Command Stream** in the navigation bar. New readings appear in the Incoming Telemetry feed every few seconds, and critical readings show up under Active Alerts.
 4. **Issue and undo commands.** In Manual Override, choose a device, click one of the command buttons, then click **Undo Last Command** to reverse it.
-5. **Trigger an insight.** Wait for a device to raise an alert, then type part of its MAC address into the device search three or more times within five minutes of the alert. A suggestion appears under Automated Insights on the next refresh. Devices that raise three critical readings within five minutes are flagged automatically.
+5. **Trigger an insight.** Wait for a device to raise an alert, then search for it in the Manual Override device search using its full MAC address or last six hex digits. Clear the field and enter the same search again until you have searched three or more times within five minutes of the alert. A suggestion appears under Automated Insights on the next refresh. Devices that raise three critical readings within five minutes are flagged automatically, so insights often appear right after seeding.
 6. **Resolve alerts.** Click **Resolve** next to an alert to clear it.
