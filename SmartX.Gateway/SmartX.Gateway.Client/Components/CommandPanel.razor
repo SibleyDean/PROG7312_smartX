@@ -1,0 +1,220 @@
+@implements IDisposable
+@using SmartX.Gateway.Shared.DataStructures
+@using SmartX.Gateway.Shared.Models
+@using System.Text
+@using System.Text.Json
+@inject HttpClient Http
+
+<div class="command-panel" aria-labelledby="command-title">
+    <header class="panel-header">
+        <h3 id="command-title">Manual Override</h3>
+        <span class="mono-label">@FilteredSensors.Count() / @Sensors.Count devices</span>
+    </header>
+
+    <div>
+        <div class="command-field">
+            <label class="mono-label" for="device-search">Search Devices</label>
+            <input id="device-search" class="command-input" value="@_searchQuery" @oninput="OnSearchInput" />
+        </div>
+
+        <div class="command-field">
+            <span class="mono-label" id="category-filter-label">Filter by Category</span>
+            <div class="filter-chips" role="group" aria-labelledby="category-filter-label">
+                @foreach (var category in Enum.GetValues<SensorCategory>())
+                {
+                    var isActive = _activeCategories.Contains(category);
+                    <button class="filter-chip @(isActive ? "active" : "")" aria-pressed="@(isActive ? "true" : "false")" @onclick="() => ToggleCategory(category)">@category.ToString()</button>
+                }
+            </div>
+            <div class="filter-chips">
+                <button class="filter-chip @(_alertedOnly ? "active" : "")" aria-pressed="@(_alertedOnly ? "true" : "false")" @onclick="() => _alertedOnly = !_alertedOnly">Alerted Only</button>
+                @if (!string.IsNullOrEmpty(_searchQuery) || _activeCategories.Count > 0 || _alertedOnly)
+                {
+                    <button class="ghost-button" @onclick="ClearFilters">Clear Filters</button>
+                }
+            </div>
+        </div>
+
+        <div class="command-field">
+            <label class="mono-label" for="target-device">Target Device</label>
+            <select id="target-device" class="command-select" @bind="_selectedSensorId">
+                <option value="">@(Sensors.Count == 0 ? "No devices available" : "Select a device")</option>
+                @foreach (var sensor in FilteredSensors)
+                {
+                    <option value="@sensor.Id">@sensor.MacAddress - @sensor.Location</option>
+                }
+            </select>
+        </div>
+
+        <div class="command-button-grid">
+            <button class="command-action" disabled="@(_selectedSensorId is null)" @onclick='() => IssueCommand("OpenValve")'>Open Valve</button>
+            <button class="command-action" disabled="@(_selectedSensorId is null)" @onclick='() => IssueCommand("CloseValve")'>Close Valve</button>
+            <button class="command-action" disabled="@(_selectedSensorId is null)" @onclick='() => IssueCommand("ToggleRelay")'>Toggle Relay</button>
+            <button class="command-action" disabled="@(_selectedSensorId is null)" @onclick='() => IssueCommand("RestartSensor")'>Restart Sensor</button>
+        </div>
+
+        <button class="ghost-button" @onclick="UndoLastCommand">Undo Last Command</button>
+
+        <div role="status">
+            @if (_inlineMessage is not null)
+            {
+                <p @key="_statusKey">@_inlineMessage</p>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<SensorProfile> Sensors { get; set; } = Array.Empty<SensorProfile>();
+    [Parameter] public HashSet<Guid> ActiveAlertIds { get; set; } = new();
+    [Parameter] public EventCallback OnCommandIssued { get; set; }
+
+    private string _searchQuery = string.Empty;
+    private Guid? _selectedSensorId;
+    private string? _inlineMessage;
+    private int _statusKey;
+    private CancellationTokenSource? _searchDebounceCts;
+    private HashSet<SensorCategory> _activeCategories = new();
+    private bool _alertedOnly;
+
+    private IEnumerable<SensorProfile> FilteredSensors => Sensors.Where(s =>
+        s.Id == _selectedSensorId
+        || ((string.IsNullOrWhiteSpace(_searchQuery)
+                || s.MacAddress.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase)
+                || s.Category.ToString().Contains(_searchQuery, StringComparison.OrdinalIgnoreCase))
+            && (_activeCategories.Count == 0 || _activeCategories.Contains(s.Category))
+            && (!_alertedOnly || ActiveAlertIds.Contains(s.Id))));
+
+    private void ToggleCategory(SensorCategory category)
+    {
+        if (!_activeCategories.Add(category))
+        {
+            _activeCategories.Remove(category);
+        }
+    }
+
+    private void ClearFilters()
+    {
+        _searchQuery = string.Empty;
+        _activeCategories.Clear();
+        _alertedOnly = false;
+    }
+
+    private async Task OnSearchInput(ChangeEventArgs e)
+    {
+        _searchQuery = e.Value?.ToString() ?? string.Empty;
+
+        _searchDebounceCts?.Cancel();
+        _searchDebounceCts?.Dispose();
+        _searchDebounceCts = new CancellationTokenSource();
+        var token = _searchDebounceCts.Token;
+
+        if (_searchQuery.Trim().Length < 2)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.Delay(300, token);
+        }
+        catch (TaskCanceledException)
+        {
+            return;
+        }
+
+        try
+        {
+            using var content = new StringContent(JsonSerializer.Serialize(_searchQuery), Encoding.UTF8, "application/json");
+            await Http.PostAsync("api/insights/search", content);
+        }
+        catch (HttpRequestException)
+        {
+            // Search is a background learning signal; a failed post must not interrupt the operator.
+        }
+    }
+
+    private async Task IssueCommand(string commandType)
+    {
+        var sensor = Sensors.FirstOrDefault(s => s.Id == _selectedSensorId);
+        if (sensor is null)
+        {
+            return;
+        }
+
+        var command = new ManualCommand(Guid.Empty, sensor.MacAddress, commandType, null, DateTime.UtcNow);
+
+        try
+        {
+            var response = await Http.PostAsJsonAsync("api/commands/issue", command);
+            if (!response.IsSuccessStatusCode)
+            {
+                _inlineMessage = await response.Content.ReadFromJsonAsync<string>() ?? "Command was rejected.";
+                _statusKey++;
+                return;
+            }
+
+            _inlineMessage = $"{commandType} sent to {sensor.MacAddress}.";
+            _statusKey++;
+            _selectedSensorId = null;
+        }
+        catch (HttpRequestException)
+        {
+            _inlineMessage = "Command could not be sent. Check the gateway connection.";
+            _statusKey++;
+            return;
+        }
+
+        try
+        {
+            using var content = new StringContent(JsonSerializer.Serialize($"{commandType} {sensor.MacAddress}"), Encoding.UTF8, "application/json");
+            await Http.PostAsync("api/insights/search", content);
+        }
+        catch (HttpRequestException)
+        {
+            // The command already succeeded; losing this learning signal is not worth surfacing.
+        }
+
+        await OnCommandIssued.InvokeAsync();
+    }
+
+    private async Task UndoLastCommand()
+    {
+        string message;
+
+        try
+        {
+            var response = await Http.PostAsync("api/commands/undo", null);
+            if (response.IsSuccessStatusCode)
+            {
+                var undone = await response.Content.ReadFromJsonAsync<ManualCommand>();
+                message = $"Undid {undone?.CommandType} on {undone?.DeviceMac}.";
+                await OnCommandIssued.InvokeAsync();
+            }
+            else
+            {
+                message = "No commands to undo.";
+            }
+        }
+        catch (HttpRequestException)
+        {
+            message = "Undo failed. Check the gateway connection.";
+        }
+
+        _inlineMessage = message;
+        _statusKey++;
+        StateHasChanged();
+
+        await Task.Delay(4000);
+        if (_inlineMessage == message)
+        {
+            _inlineMessage = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        _searchDebounceCts?.Cancel();
+        _searchDebounceCts?.Dispose();
+    }
+}

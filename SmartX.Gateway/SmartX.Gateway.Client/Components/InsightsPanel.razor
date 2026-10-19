@@ -1,0 +1,31 @@
+@using SmartX.Gateway.Shared.Services
+
+<div class="insights-panel" aria-labelledby="insights-title">
+    <header class="panel-header">
+        <h3 id="insights-title">Automated Insights</h3>
+        <span class="mono-label">@Insights.Count suggested</span>
+    </header>
+
+    <div class="insights-list">
+        @if (Insights.Count == 0)
+        {
+            <div class="empty-state">No patterns detected yet. Suggestions appear once searches, commands and critical readings start to repeat.</div>
+        }
+
+        @foreach (var insight in Insights)
+        {
+            <div class="insight-card" @key="insight">
+                <div class="panel-header">
+                    <span class="mono-data">@insight.SensorMac</span>
+                    <span class="mono-label accent-text">@insight.SuggestedAction</span>
+                </div>
+                <p>@insight.Reason</p>
+                <span class="mono-label">Confidence <span class="accent-text">@($"{insight.Confidence * 100:F0}%")</span></span>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<ActionInsight> Insights { get; set; } = Array.Empty<ActionInsight>();
+}

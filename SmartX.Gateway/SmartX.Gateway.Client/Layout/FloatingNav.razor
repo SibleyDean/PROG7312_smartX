@@ -1,0 +1,51 @@
+@implements IDisposable
+@inject NavigationManager Navigation
+
+<header class="nav-container">
+    <div class="nav-bar">
+        <a class="nav-brand" href="" aria-label="Smart-X home">
+            SMART-X<span class="nav-badge">Gateway</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+            @foreach (var (href, label) in links)
+            {
+                <NavLink href="@href">
+                    @if (IsActive(href))
+                    {
+                        <span class="nav-active-dot" aria-hidden="true"></span>
+                    }
+                    @label
+                </NavLink>
+            }
+        </nav>
+    </div>
+</header>
+
+@code {
+    private static readonly (string Href, string Label)[] links =
+    [
+        ("dashboard", "Ingestion"),
+        ("command-stream", "Command Stream"),
+        ("topology", "Topology")
+    ];
+
+    protected override void OnInitialized()
+    {
+        Navigation.LocationChanged += OnLocationChanged;
+    }
+
+    // NavLink does not expose its active state to child content, so mirror its prefix match here.
+    private bool IsActive(string href)
+    {
+        var path = Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0];
+        return path.Equals(href, StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith(href + "/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => StateHasChanged();
+
+    public void Dispose()
+    {
+        Navigation.LocationChanged -= OnLocationChanged;
+    }
+}

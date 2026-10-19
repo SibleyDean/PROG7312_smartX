@@ -1,0 +1,219 @@
+@page "/command-stream"
+@rendermode InteractiveWebAssembly
+@implements IDisposable
+@using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
+@using SmartX.Gateway.Client.Components
+@inject HttpClient Http
+
+<PageTitle>Smart-X | Command Stream</PageTitle>
+
+<div class="section">
+    <div>
+        <h1>Command Stream</h1>
+        <div class="filter-chips">
+            @if (_loadError is not null)
+            {
+                <span class="mono-label accent-text">Offline</span>
+            }
+            else if (_isLoading)
+            {
+                <span class="mono-label">Connecting</span>
+            }
+            else
+            {
+                <span class="mono-label accent-text"><span class="nav-active-dot" aria-hidden="true"></span>Live</span>
+            }
+            <span class="mono-label">@(_sensors?.Count ?? 0) sensors</span>
+            <span class="mono-label">Polling every 3s</span>
+        </div>
+        @if (_loadError is not null)
+        {
+            <p class="accent-text" role="alert">@_loadError</p>
+        }
+    </div>
+
+    <div class="command-layout @(_panelsEntered ? "panels-entered" : "")">
+        @if (_isLoading)
+        {
+            <TelemetryFeed Sensors="@(_sensors ?? new())" NewReadingIds="_newReadingIds" IsLoading="_isLoading" />
+
+            <div class="command-panel" aria-busy="true">
+                <header class="panel-header">
+                    <h3>Manual Override</h3>
+                    <span class="mono-label">Waiting</span>
+                </header>
+                <div class="empty-state" role="status">Loading devices...</div>
+            </div>
+
+            <div class="alerts-panel" aria-busy="true">
+                <header class="panel-header">
+                    <h3>Active Alerts</h3>
+                    <span class="mono-label">--</span>
+                </header>
+                <div class="empty-state" role="status">Reading alert set...</div>
+            </div>
+
+            <div class="insights-panel" aria-busy="true">
+                <header class="panel-header">
+                    <h3>Automated Insights</h3>
+                    <span class="mono-label">--</span>
+                </header>
+                <div class="empty-state" role="status">Loading insights...</div>
+            </div>
+        }
+        else if (_loadError is not null)
+        {
+            <div class="feed-panel">
+                <header class="panel-header">
+                    <h3>Incoming Telemetry</h3>
+                    <span class="mono-label accent-text">No signal</span>
+                </header>
+                <div class="empty-state">Gateway unreachable. The telemetry stream resumes automatically on the next successful poll.</div>
+            </div>
+
+            <CommandPanel Sensors="@(_sensors ?? new())" ActiveAlertIds="_activeAlertIds" OnCommandIssued="HandleCommandIssued" />
+
+            <div class="alerts-panel">
+                <header class="panel-header">
+                    <h3>Active Alerts</h3>
+                    <span class="mono-label">--</span>
+                </header>
+                <div class="empty-state">Alert set unavailable. Alert state cannot be confirmed while the gateway is offline.</div>
+            </div>
+
+            <div class="insights-panel">
+                <header class="panel-header">
+                    <h3>Automated Insights</h3>
+                    <span class="mono-label">--</span>
+                </header>
+                <div class="empty-state">Insights unavailable. Suggestions reload with the next successful poll.</div>
+            </div>
+        }
+        else
+        {
+            <TelemetryFeed Sensors="@(_sensors ?? new())" NewReadingIds="_newReadingIds" IsLoading="_isLoading" />
+            <CommandPanel Sensors="@(_sensors ?? new())" ActiveAlertIds="_activeAlertIds" OnCommandIssued="HandleCommandIssued" />
+            <AlertsPanel Sensors="@(_sensors ?? new())" ActiveAlertIds="_activeAlertIds" OnAlertResolved="HandleAlertResolved" />
+            <InsightsPanel Insights="@(_insights ?? new())" />
+        }
+    </div>
+</div>
+
+@code {
+    private List<SensorProfile>? _sensors;
+    private List<ActionInsight>? _insights;
+    private System.Threading.Timer? _pollTimer;
+    private bool _isRefreshing;
+    private readonly HashSet<string> _knownReadingIds = new();
+    private readonly HashSet<string> _newReadingIds = new();
+    private HashSet<Guid> _activeAlertIds = new();
+    private bool _isLoading = true;
+    private string? _loadError;
+
+    // Pre-rendered HTML gets no interactive render to add the class, so it must ship visible.
+    private bool _panelsEntered = !OperatingSystem.IsBrowser();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _isLoading = true;
+
+        try
+        {
+            _sensors = await Http.GetFromJsonAsync<List<SensorProfile>>("api/sensors") ?? new();
+            _insights = await Http.GetFromJsonAsync<List<ActionInsight>>("api/insights/suggested") ?? new();
+            _activeAlertIds = new HashSet<Guid>(await Http.GetFromJsonAsync<List<Guid>>("api/alerts/active") ?? new());
+        }
+        catch (HttpRequestException)
+        {
+            _sensors ??= new();
+            _insights ??= new();
+            _loadError = "could not reach the gateway - retrying in background";
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+
+        _knownReadingIds.UnionWith((_sensors ?? new()).SelectMany(s => s.HistoricalTelemetry.Select(r => $"{s.Id}-{r.Timestamp.Ticks}")));
+
+        // OnInitializedAsync also runs during server pre-render; polling only makes sense in the live WASM instance.
+        if (OperatingSystem.IsBrowser())
+        {
+            _pollTimer = new System.Threading.Timer(async _ => await RefreshAsync(), null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            _newReadingIds.Clear();
+            return;
+        }
+
+        if (_panelsEntered)
+        {
+            return;
+        }
+
+        // The panels have to paint once in their hidden state before the class lands, otherwise the transition is skipped.
+        await Task.Delay(50);
+        _panelsEntered = true;
+        StateHasChanged();
+    }
+
+    private Task HandleCommandIssued() => RefreshAsync();
+
+    private Task HandleAlertResolved() => RefreshAsync();
+
+    private async Task RefreshAsync()
+    {
+        if (_isRefreshing)
+        {
+            return;
+        }
+
+        _isRefreshing = true;
+
+        try
+        {
+            var sensors = await Http.GetFromJsonAsync<List<SensorProfile>>("api/sensors") ?? new();
+            var insights = await Http.GetFromJsonAsync<List<ActionInsight>>("api/insights/suggested") ?? new();
+            var alertIds = await Http.GetFromJsonAsync<List<Guid>>("api/alerts/active") ?? new();
+
+            var freshIds = sensors.SelectMany(s => s.HistoricalTelemetry.Select(r => $"{s.Id}-{r.Timestamp.Ticks}")).ToList();
+            _newReadingIds.UnionWith(freshIds.Where(id => !_knownReadingIds.Contains(id)));
+            _sensors = sensors;
+            _insights = insights;
+            _activeAlertIds = new HashSet<Guid>(alertIds);
+            _knownReadingIds.UnionWith(freshIds);
+
+            if (_loadError is not null)
+            {
+                _loadError = null;
+            }
+        }
+        catch (HttpRequestException)
+        {
+            // A failed background poll is retried on the next tick; reporting it would repeat every 3 seconds.
+            return;
+        }
+        finally
+        {
+            _isRefreshing = false;
+        }
+
+        // A tick already in flight when the component is disposed must not render into a torn-down component.
+        if (_pollTimer is not null)
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    public void Dispose()
+    {
+        _pollTimer?.Dispose();
+        _pollTimer = null;
+    }
+}

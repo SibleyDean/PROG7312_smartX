@@ -1,83 +1,138 @@
-﻿@rendermode InteractiveWebAssembly
+@rendermode InteractiveWebAssembly
 @page "/dashboard"
 @using SmartX.Gateway.Shared.Models
 @using System.Net.Http.Json
 @inject HttpClient Http
 
-<div class="section" style="padding-top: 8rem;">
-    <!-- Header -->
-    <div class="dashboard-header">
+<PageTitle>Smart-X | Ingestion</PageTitle>
+
+<div class="section">
+    <div class="panel-header">
         <div>
-            <div class="section-tag">
-                <span class="tag-line"></span>
-                <span class="mono-label" style="color: var(--accent-lime);">System Interface</span>
-            </div>
-            <h1 style="font-size: 3rem;">Telemetry Dashboard</h1>
-            <p style="margin-top: 0.5rem;">Manage sensor profiles and monitor real-time ingestion.</p>
+            <h1>Telemetry Dashboard</h1>
+            <p>Manage sensor profiles and monitor real-time ingestion.</p>
         </div>
-        <div class="dashboard-actions">
-            <button class="ghost-button" @onclick="LoadSensors">↻ Refresh</button>
-            <button class="accent-button" @onclick="SeedData">Seed 10 Mock Sensors</button>
+        <div class="filter-chips">
+            <button class="ghost-button" @onclick="LoadSensors">Refresh</button>
+            @if (sensors is { Count: > 0 })
+            {
+                <button class="accent-button" @onclick="SeedData">Seed 10 Mock Sensors</button>
+            }
         </div>
     </div>
 
     @if (sensors == null)
     {
-        <div class="state-panel">
-            <p class="loading-text">Loading sensor data...</p>
+        <div class="panel" aria-busy="true">
+            <header class="panel-header">
+                <h3>Sensor Registry</h3>
+                <span class="mono-label">Loading</span>
+            </header>
+            <div class="empty-state" role="status">Fetching sensor registry...</div>
         </div>
     }
     else if (!sensors.Any())
     {
-        <div class="state-panel">
-            <p style="margin-bottom: 1rem;">No sensors registered in the system.</p>
-            <button class="accent-button" @onclick="SeedData">Initialize Mock Data</button>
+        <div class="panel">
+            <header class="panel-header">
+                <h3>Sensor Registry</h3>
+                <span class="mono-label">0 sensors</span>
+            </header>
+            <div class="empty-state">No sensors registered. Seed ten mock sensors to fill the registry and start generating telemetry for the command stream.</div>
+            <div>
+                <button class="accent-button" @onclick="SeedData">Seed 10 Mock Sensors</button>
+            </div>
         </div>
     }
     else
     {
-        <div class="data-grid">
-            <div class="data-grid-header">
-                <span class="mono-label">MAC Address</span>
-                <span class="mono-label">Location</span>
-                <span class="mono-label">Category</span>
-                <span class="mono-label">Telemetry Points</span>
-                <span class="mono-label" style="text-align: right;">Actions</span>
-            </div>
-
-            @foreach (var sensor in sensors)
-            {
-                <div class="data-grid-row">
-                    <span class="data-cell-mac">@sensor.MacAddress</span>
-                    <span style="color: var(--text-secondary); font-size: 0.85rem;">@sensor.Location</span>
-                    <span><span class="category-badge">@sensor.Category</span></span>
-                    <span class="data-cell-value">@sensor.HistoricalTelemetry.Count</span>
-                    <div style="text-align: right;">
-                        <button class="ghost-button" @onclick="() => ViewDetails(sensor.Id)">View</button>
+        <div class="command-layout">
+            <div class="panel" aria-labelledby="registry-title">
+                <header class="panel-header">
+                    <h3 id="registry-title">Sensor Registry</h3>
+                    <span class="mono-label">@sensors.Count sensors</span>
+                </header>
+                <div class="data-grid">
+                    <div class="data-grid-header">
+                        <span>MAC Address</span>
+                        <span>Location</span>
+                        <span>Category</span>
+                        <span>Points</span>
+                        <span>Detail</span>
                     </div>
-                </div>
-            }
-        </div>
 
-        @if (selectedSensor != null)
-        {
-            <div class="detail-panel">
-                <div class="detail-header">
-                    <h3>Details: @selectedSensor.MacAddress</h3>
-                    <button class="detail-close" @onclick="() => selectedSensor = null">✕ Close</button>
-                </div>
-                <span class="mono-label">Recent Telemetry Readings (Last 10)</span>
-                <div class="readings-grid">
-                    @foreach (var reading in selectedSensor.HistoricalTelemetry.OrderByDescending(p => p.Timestamp).Take(10))
+                    @foreach (var sensor in sensors)
                     {
-                        <div class="reading-card">
-                            <span class="mono-label" style="font-size: 0.6rem;">@reading.Timestamp.ToString("HH:mm:ss")</span>
-                            <span class="reading-value">@reading.Value.ToString("F2")</span>
+                        <div class="data-grid-row">
+                            <span class="data-cell-mac @(selectedSensor?.Id == sensor.Id ? "accent-text" : "")">@sensor.MacAddress</span>
+                            <span>@sensor.Location</span>
+                            <span><span class="category-badge">@sensor.Category</span></span>
+                            <span class="data-cell-value">@sensor.HistoricalTelemetry.Count</span>
+                            <span>
+                                <button class="ghost-button" @onclick="() => ViewDetails(sensor.Id)">View</button>
+                            </span>
                         </div>
                     }
                 </div>
             </div>
-        }
+
+            <div class="insights-list">
+                @if (selectedSensor != null)
+                {
+                    <div class="panel" aria-labelledby="detail-title" @key="selectedSensor.Id">
+                        <header class="panel-header">
+                            <h3 id="detail-title">@selectedSensor.MacAddress</h3>
+                            <button class="ghost-button" @onclick="() => selectedSensor = null">Close</button>
+                        </header>
+                        <span class="mono-label">Last 10 readings</span>
+                        @if (selectedSensor.HistoricalTelemetry.Count == 0)
+                        {
+                            <div class="empty-state">No readings recorded for this sensor yet.</div>
+                        }
+                        else
+                        {
+                            <div class="feed-scroll">
+                                @foreach (var reading in selectedSensor.HistoricalTelemetry.OrderByDescending(p => p.Timestamp).Take(10))
+                                {
+                                    <div class="feed-row">
+                                        <span class="feed-row-time" style="text-align: left;">@reading.Timestamp.ToString("HH:mm:ss")</span>
+                                        <span></span>
+                                        <span class="feed-row-value">@reading.Value.ToString("F2")</span>
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+
+                <div class="command-button-grid">
+                    <div class="insight-card">
+                        <span class="mono-label">Sensors</span>
+                        <h2 class="accent-text">@sensors.Count</h2>
+                    </div>
+                    <div class="insight-card">
+                        <span class="mono-label">Readings</span>
+                        <h2>@sensors.Sum(s => s.HistoricalTelemetry.Count)</h2>
+                    </div>
+                </div>
+
+                <div class="panel" aria-labelledby="breakdown-title">
+                    <header class="panel-header">
+                        <h3 id="breakdown-title">By Category</h3>
+                    </header>
+                    <div>
+                        @foreach (var category in Enum.GetValues<SensorCategory>())
+                        {
+                            <div class="feed-row">
+                                <span class="feed-row-mac">@category</span>
+                                <span></span>
+                                <span class="feed-row-value">@sensors.Count(s => s.Category == category)</span>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
     }
 </div>
 

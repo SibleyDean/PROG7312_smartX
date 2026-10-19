@@ -1,152 +1,36 @@
-﻿@page "/"
+@page "/"
 
 <PageTitle>Smart-X | Ingestion Gateway</PageTitle>
 
-<!-- FLOATING NAVIGATION -->
-<div class="nav-container">
-    <div class="nav-bar">
-        <div class="nav-brand">
-            Smart-X
-            <span class="nav-badge">GATEWAY</span>
-        </div>
-        <div class="nav-links">
-            <a href="#features">Features</a>
-            <a href="#architecture">Architecture</a>
-            <a href="/swagger">API</a>
-            <span class="nav-kbd">⌘K</span>
-            <a href="/dashboard" class="accent-button">Launch Dashboard</a>
-        </div>
-    </div>
-</div>
-
-<!-- HERO -->
-<section class="section hero">
-    <div class="hero-grid">
-        <div>
-            <div class="status-pill">
-                <span class="status-dot"></span>
-                <span>System Live</span>
-                <span style="color: var(--border-subtle);">|</span>
-                <span>v2.4.1</span>
-            </div>
-            <h1 class="hero-title">
-                Smart-X //<br />
-                <span class="accent-text">Ingestion Gateway</span>
-            </h1>
-            <p class="hero-subtitle">
-                A high-throughput, type-safe telemetry ingestion pipeline built on .NET 8 and Blazor WebAssembly. Process multi-typed sensor data, validate recursive deployment trees, and manage multipart attachments—all in real-time.
-            </p>
-            <div class="hero-actions">
-                <a href="/dashboard" class="accent-button">Initialize Dashboard</a>
-                <a href="#features" class="text-link">View Specifications ↓</a>
-            </div>
-        </div>
-
-        <div class="monitor-grid">
-            <div class="monitor-tile wide">
-                <div class="monitor-header">
-                    <span class="mono-label">Ingestion Rate</span>
-                    <span style="color: var(--accent-lime); font-size: 0.75rem;">●</span>
-                </div>
-                <div class="monitor-value">1,248 <small>pts/sec</small></div>
-                <div class="sparkline">
-                    @for (int i = 0; i < 20; i++)
-                    {
-                        <div class="sparkline-bar" style="height: @(20 + (i * 7) % 80)%;"></div>
-                    }
-                </div>
-            </div>
-            <div class="monitor-tile">
-                <span class="mono-label">Active Sensors</span>
-                <div class="monitor-value">847</div>
-            </div>
-            <div class="monitor-tile">
-                <span class="mono-label">Error Rate</span>
-                <div class="monitor-value" style="color: var(--text-secondary);">0.02%</div>
-            </div>
-        </div>
-    </div>
-</section>
-
-<!-- FEATURES / BENTO GRID -->
-<section id="features" class="section">
-    <div class="section-tag">
-        <span class="tag-line"></span>
-        <span class="mono-label" style="color: var(--accent-lime);">Core Capabilities</span>
-    </div>
-    <h2 style="margin-bottom: 2.5rem;">Engineered for Scale</h2>
-
-    <div class="bento-grid">
-        <!-- Hero Tile -->
-        <div class="bento-tile hero-tile">
-            <div>
-                <span class="mono-label">01 / Telemetry</span>
-                <h3 class="bento-title">Real-Time Ingestion & Validation</h3>
-                <p class="bento-description">Generic wrappers handle disparate data types—floats, integers, booleans—without boxing or runtime coercion.</p>
-            </div>
-            <div class="code-block">
-                TelemetryReading&lt;double&gt; packet = new();<br />
-                packet += new TelemetryReading&lt;double&gt; { Value = 42.5 };<br />
-                <span class="highlight">// → Aggregated</span>
-            </div>
-        </div>
-
-        <!-- Tall Tile -->
-        <div class="bento-tile tall-tile">
-            <div>
-                <span class="mono-label">02 / Structure</span>
-                <h3 class="bento-title" style="font-size: 1.1rem;">Recursive Deployment Validation</h3>
-                <p class="bento-description">Validate nested device trees: Sub-Zone B → Zone 1 → Facility A.</p>
-            </div>
-            <div class="tree-diagram">
-                <div class="tree-node active">Facility</div>
-                <div class="tree-connector"></div>
-                <div class="tree-node">Zone</div>
-                <div class="tree-connector"></div>
-                <div class="tree-node">Node</div>
-            </div>
-        </div>
-
-        <!-- Compact Tile -->
-        <div class="bento-tile">
-            <span class="mono-label">03 / Media</span>
-            <h3 class="bento-title" style="font-size: 1rem;">Multipart Attachments</h3>
-            <p class="bento-description">Upload logs & photos.</p>
-        </div>
-
-        <!-- Compact Tile -->
-        <div class="bento-tile">
-            <span class="mono-label">04 / API</span>
-            <h3 class="bento-title" style="font-size: 1rem;">Minimal API Endpoints</h3>
-            <p class="bento-description">Typed, testable, lean.</p>
-        </div>
-
-        <!-- Wide Tile -->
-        <div class="bento-tile wide-tile" style="flex-direction: row; align-items: center; justify-content: space-between;">
-            <div>
-                <span class="mono-label">05 / Stack</span>
-                <h3 class="bento-title" style="font-size: 1.1rem; margin: 0.25rem 0 0 0;">.NET 8 + Blazor WASM</h3>
-            </div>
-            <div style="display: flex; gap: 0.5rem;">
-                <span class="category-badge">C# 12</span>
-                <span class="category-badge">Minimal API</span>
-            </div>
-        </div>
-    </div>
-</section>
-
-<!-- CTA -->
-<section id="architecture" class="section">
-    <div class="cta-panel">
-        <div>
-            <h2>Ready to ingest?</h2>
-            <p style="margin-top: 0.5rem;">Open the dashboard to register sensors, seed mock data, and monitor the pipeline in real-time.</p>
-        </div>
-        <a href="/dashboard" class="accent-button">Launch Dashboard</a>
+<section class="section">
+    <span class="mono-label accent-text">Telemetry ingestion and control</span>
+    <h1>Smart-X Ingestion Gateway</h1>
+    <p>
+        A typed telemetry pipeline for field sensors, built on .NET 8 and Blazor WebAssembly.
+        Validate deployment trees, stream readings and issue manual overrides from one console.
+    </p>
+    <div class="filter-chips">
+        <a href="command-stream" class="accent-button">Enter Command Stream</a>
+        <a href="dashboard" class="ghost-button">Open Ingestion</a>
     </div>
 
-    <div class="footer-bar">
-        <span class="mono-label">© 2026 Smart-X Systems. All rights reserved.</span>
-        <span class="mono-label">Built with .NET 8 & Blazor WebAssembly</span>
+    <div class="insights-list" style="max-width: 65ch; margin-top: 3rem;">
+        <div class="insight-card">
+            <h3>Real-time ingestion</h3>
+            <p>Generic readings carry floats, integers and booleans without boxing, and aggregate in place.</p>
+        </div>
+        <div class="insight-card">
+            <h3>Recursive deployment validation</h3>
+            <p>Nested device trees are checked from the facility down to every sensor node.</p>
+        </div>
+        <div class="insight-card">
+            <h3>Predictive overrides</h3>
+            <p>Repeated searches, commands and critical readings surface as suggested actions.</p>
+        </div>
     </div>
+
+    <footer class="panel-header" style="margin-top: 3rem;">
+        <span class="mono-label">&copy; 2026 Smart-X Systems</span>
+        <span class="mono-label">.NET 8 &middot; Blazor WebAssembly</span>
+    </footer>
 </section>

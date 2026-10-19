@@ -1,0 +1,53 @@
+@using SmartX.Gateway.Shared.Models
+
+@{
+    var recentReadings = Sensors
+        .SelectMany(s => s.HistoricalTelemetry.Select(r => (SensorId: s.Id, Mac: s.MacAddress, Reading: r)))
+        .OrderByDescending(x => x.Reading.Timestamp)
+        .Take(20)
+        .ToList();
+}
+
+<div class="feed-panel" aria-labelledby="feed-title" aria-busy="@(IsLoading ? "true" : "false")">
+    <header class="panel-header">
+        <h3 id="feed-title">Incoming Telemetry</h3>
+        <span class="mono-label">@(IsLoading ? "Connecting" : $"Latest {recentReadings.Count}")</span>
+    </header>
+
+    <div class="feed-row" aria-hidden="true">
+        <span class="mono-label">Device</span>
+        <span class="mono-label" style="text-align: right;">Value</span>
+        <span class="mono-label" style="text-align: right;">Time</span>
+    </div>
+
+    <div class="feed-scroll">
+        @if (IsLoading)
+        {
+            <div class="empty-state" role="status">Opening telemetry stream...</div>
+        }
+        else if (recentReadings.Count == 0)
+        {
+            <div class="empty-state">
+                <span>No telemetry yet. Seed sensors from the <a class="accent-text" href="dashboard">ingestion dashboard</a> and readings will stream in here.</span>
+            </div>
+        }
+
+        @foreach (var (sensorId, mac, reading) in recentReadings)
+        {
+            var rowId = $"{sensorId}-{reading.Timestamp.Ticks}";
+            var critical = reading.Value > 90 || reading.Value < 10 ? "critical" : "";
+            var entered = NewReadingIds.Contains(rowId) ? "entered" : "";
+            <div class="feed-row @critical @entered" @key="rowId">
+                <span class="feed-row-mac">@mac</span>
+                <span class="feed-row-value @critical">@reading.Value.ToString("F2")@(critical == "critical" ? " CRIT" : "")</span>
+                <span class="feed-row-time">@reading.Timestamp.ToString("HH:mm:ss")</span>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<SensorProfile> Sensors { get; set; } = Array.Empty<SensorProfile>();
+    [Parameter] public HashSet<string> NewReadingIds { get; set; } = new();
+    [Parameter] public bool IsLoading { get; set; }
+}

@@ -1,0 +1,75 @@
+@using SmartX.Gateway.Shared.Models
+@inject HttpClient Http
+
+<div class="alerts-panel" aria-labelledby="alerts-title">
+    <header class="panel-header">
+        <h3 id="alerts-title">Active Alerts</h3>
+        <span class="mono-label @(AlertedCount > 0 ? "accent-text" : "")">@AlertedCount open</span>
+    </header>
+
+    <div class="alerts-list">
+        @if (Alerts.Count == 0)
+        {
+            <div class="empty-state">No active alerts. Sensors that report a critical reading are listed here until resolved.</div>
+        }
+        else
+        {
+            @foreach (var alert in Alerts)
+            {
+                <div class="alert-row" @key="alert.SensorId">
+                    <span class="status-dot" aria-hidden="true"></span>
+                    <span class="mono-data">@alert.MacAddress</span>
+                    <span class="mono-label">@alert.Location</span>
+                    <span class="category-badge">@alert.Category</span>
+                    <button class="ghost-button" @onclick="() => ResolveAsync(alert.SensorId)">Resolve</button>
+                </div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<SensorProfile> Sensors { get; set; } = Array.Empty<SensorProfile>();
+    [Parameter] public HashSet<Guid> ActiveAlertIds { get; set; } = new();
+    [Parameter] public EventCallback OnAlertResolved { get; set; }
+
+    private int AlertedCount => ActiveAlertIds.Count;
+
+    private record AlertView(Guid SensorId, string MacAddress, string Location, SensorCategory Category);
+
+    private List<AlertView> Alerts
+    {
+        get
+        {
+            var views = new List<AlertView>();
+            foreach (var id in ActiveAlertIds)
+            {
+                var sensor = Sensors.FirstOrDefault(s => s.Id == id);
+                if (sensor is null)
+                {
+                    continue;
+                }
+
+                views.Add(new AlertView(sensor.Id, sensor.MacAddress, sensor.Location, sensor.Category));
+            }
+
+            return views;
+        }
+    }
+
+    private async Task ResolveAsync(Guid sensorId)
+    {
+        try
+        {
+            var response = await Http.PostAsync($"api/alerts/{sensorId}/resolve", null);
+            if (response.IsSuccessStatusCode)
+            {
+                await OnAlertResolved.InvokeAsync();
+            }
+        }
+        catch (HttpRequestException)
+        {
+            // The alert stays listed and the next poll shows the true state, so the operator can simply retry.
+        }
+    }
+}
