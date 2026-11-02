@@ -1,0 +1,127 @@
+@using SmartX.Gateway.Shared.Models
+@inject HttpClient Http
+
+<div class="panel sim-controls" aria-labelledby="sim-title">
+    <header class="panel-header">
+        <h3 id="sim-title">Live Data</h3>
+        @if (_isPaused is bool paused)
+        {
+            <span class="mono-label @(paused ? "warning-text" : "ok-text")">@(paused ? "Paused" : "Running")</span>
+        }
+        else
+        {
+            <span class="mono-label">--</span>
+        }
+    </header>
+
+    <div class="sim-row">
+        <p class="hint-text">
+            @if (_isPaused == true)
+            {
+                <text>New readings are paused. Existing data stays as it is until you resume.</text>
+            }
+            else
+            {
+                <text>The gateway simulates a new reading from a random sensor every 4-12 seconds.</text>
+            }
+        </p>
+        <button class="ghost-button" disabled="@(_isPaused is null || _isBusy)" @onclick="TogglePauseAsync">
+            @(_isPaused == true ? "Resume live data" : "Pause live data")
+        </button>
+    </div>
+
+    <div class="sim-row">
+        @if (_confirmingClear)
+        {
+            <div class="confirm-box" role="alertdialog" aria-labelledby="clear-confirm-text">
+                <p id="clear-confirm-text">
+                    Demo sensors will be removed; mesh network sensors are kept and reset.
+                    This also clears every reading, open alert, the telemetry log, command history and insights,
+                    and brings any simulated offline nodes back online. It cannot be undone.
+                </p>
+                <div class="filter-chips">
+                    <button class="accent-button" disabled="@_isBusy" @onclick="ClearAllAsync">Yes, clear everything</button>
+                    <button class="ghost-button" @onclick="() => _confirmingClear = false">Cancel</button>
+                </div>
+            </div>
+        }
+        else
+        {
+            <p class="hint-text">Start over: remove demo sensors and reset the mesh network sensors.</p>
+            <button class="ghost-button" disabled="@(SensorCount == 0 || _isBusy)" @onclick="() => _confirmingClear = true">Clear all sensors</button>
+        }
+    </div>
+
+    <div role="status">
+        @if (_message is not null)
+        {
+            <p class="hint-text">@_message</p>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public int SensorCount { get; set; }
+    [Parameter] public EventCallback OnCleared { get; set; }
+
+    private bool? _isPaused;
+    private bool _isBusy;
+    private bool _confirmingClear;
+    private string? _message;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _isPaused = (await Http.GetFromJsonAsync<SimulationStatus>("api/simulation"))?.IsPaused;
+        }
+        catch (HttpRequestException)
+        {
+            _message = "Live data status unavailable - gateway unreachable.";
+        }
+    }
+
+    private async Task TogglePauseAsync()
+    {
+        _isBusy = true;
+        _message = null;
+
+        try
+        {
+            var response = await Http.PostAsync(_isPaused == true ? "api/simulation/resume" : "api/simulation/pause", null);
+            response.EnsureSuccessStatusCode();
+            _isPaused = (await response.Content.ReadFromJsonAsync<SimulationStatus>())?.IsPaused;
+        }
+        catch (HttpRequestException)
+        {
+            _message = "Could not change live data - gateway unreachable.";
+        }
+        finally
+        {
+            _isBusy = false;
+        }
+    }
+
+    private async Task ClearAllAsync()
+    {
+        _isBusy = true;
+        _message = null;
+
+        try
+        {
+            var response = await Http.PostAsync("api/sensors/clear", null);
+            response.EnsureSuccessStatusCode();
+            _confirmingClear = false;
+            _message = "Demo sensors removed. Mesh sensors were reset, and alerts, logs, commands and insights cleared.";
+            await OnCleared.InvokeAsync();
+        }
+        catch (HttpRequestException)
+        {
+            _message = "Clear failed - gateway unreachable. Refresh to see the current state.";
+        }
+        finally
+        {
+            _isBusy = false;
+        }
+    }
+}

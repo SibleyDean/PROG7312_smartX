@@ -46,6 +46,14 @@ public class CommandHistoryStack<T> where T : class
         }
     }
 
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _stack.Clear();
+        }
+    }
+
     public IReadOnlyList<T> Snapshot()
     {
         lock (_lock)

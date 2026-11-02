@@ -82,6 +82,15 @@ public class DeviceRegistry
         }
     }
 
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _devices.Clear();
+            _idToMacMap.Clear();
+        }
+    }
+
     public IReadOnlyList<SensorProfile> GetAll()
     {
         lock (_lock)

@@ -1,75 +1,121 @@
 @using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
 @inject HttpClient Http
 
 <div class="alerts-panel" aria-labelledby="alerts-title">
     <header class="panel-header">
         <h3 id="alerts-title">Active Alerts</h3>
-        <span class="mono-label @(AlertedCount > 0 ? "accent-text" : "")">@AlertedCount open</span>
+        <div class="filter-chips" style="margin-bottom: 0; align-items: center;">
+            <span class="mono-label @(Alerts.Count > 0 ? "critical-text" : "")">@Alerts.Count open</span>
+            @if (Alerts.Count > 1)
+            {
+                <button class="ghost-button" style="padding: 0.3rem 0.7rem;" disabled="@_isBusy" title="@AcknowledgeHint" @onclick="AcknowledgeAllAsync">Acknowledge all</button>
+            }
+        </div>
     </header>
+
+    @if (Alerts.Count > 0)
+    {
+        <p id="acknowledge-hint" class="hint-text">@AcknowledgeHint</p>
+    }
 
     <div class="alerts-list">
         @if (Alerts.Count == 0)
         {
-            <div class="empty-state">No active alerts. Sensors that report a critical reading are listed here until resolved.</div>
+            <div class="empty-state">
+                <span>
+                    No open alerts - every sensor's last bad reading has been dealt with.
+                    New warnings and critical readings appear here automatically.
+                    To review a sensor's history, open the <a class="inline-link" href="dashboard">Sensors page</a>.
+                </span>
+            </div>
         }
         else
         {
             @foreach (var alert in Alerts)
             {
-                <div class="alert-row" @key="alert.SensorId">
-                    <span class="status-dot" aria-hidden="true"></span>
-                    <span class="mono-data">@alert.MacAddress</span>
-                    <span class="mono-label">@alert.Location</span>
-                    <span class="category-badge">@alert.Category</span>
-                    <button class="ghost-button" @onclick="() => ResolveAsync(alert.SensorId)">Resolve</button>
+                var status = alert.Priority == 1 ? ReadingStatus.Critical : ReadingStatus.Warning;
+                var tone = status.ToString().ToLowerInvariant();
+                <div class="alert-row @tone" @key="alert.Sensor.Id">
+                    <span class="status-dot @tone" aria-hidden="true"></span>
+                    <div class="alert-main">
+                        <span>
+                            <StatusPill Status="status" />
+                            <span class="mono-data @(status == ReadingStatus.Critical ? "critical-text" : "warning-text")">@SensorReadingInfo.Format(alert.Value, alert.Sensor.Category)</span>
+                            <span class="feed-row-time" title="@TimeDisplay.Full(alert.Timestamp)">&middot; @TimeDisplay.Relative(alert.Timestamp)</span>
+                        </span>
+                        <span class="mono-data">@alert.Sensor.MacAddress<SourceTag Source="alert.Sensor.Source" /></span>
+                        <span class="feed-row-sub">@alert.Sensor.Location - @SensorReadingInfo.Describe(alert.Sensor.Category)</span>
+                    </div>
+                    <div class="alert-actions">
+                        <button class="ghost-button" @onclick="() => OnSendCommand.InvokeAsync(alert.Sensor.Id)"
+                                aria-label="Send command to @alert.Sensor.MacAddress">Send command</button>
+                        <button class="ghost-button" disabled="@_isBusy" title="@AcknowledgeHint" aria-describedby="acknowledge-hint"
+                                aria-label="Acknowledge alert for @alert.Sensor.MacAddress" @onclick="() => AcknowledgeAsync(alert.Sensor.Id)">Acknowledge</button>
+                    </div>
                 </div>
             }
+        }
+    </div>
+
+    <div role="status">
+        @if (_error is not null)
+        {
+            <p class="hint-text critical-text">@_error</p>
         }
     </div>
 </div>
 
 @code {
+    private const string AcknowledgeHint = "Acknowledging clears an alert until that sensor's next warning or critical reading.";
+
     [Parameter] public IReadOnlyList<SensorProfile> Sensors { get; set; } = Array.Empty<SensorProfile>();
-    [Parameter] public HashSet<Guid> ActiveAlertIds { get; set; } = new();
+    [Parameter] public IReadOnlyList<AlertDetail> AlertDetails { get; set; } = Array.Empty<AlertDetail>();
     [Parameter] public EventCallback OnAlertResolved { get; set; }
+    [Parameter] public EventCallback<Guid> OnSendCommand { get; set; }
 
-    private int AlertedCount => ActiveAlertIds.Count;
+    private bool _isBusy;
+    private string? _error;
 
-    private record AlertView(Guid SensorId, string MacAddress, string Location, SensorCategory Category);
+    private record AlertView(SensorProfile Sensor, double Value, int Priority, DateTime Timestamp);
 
-    private List<AlertView> Alerts
+    // Critical first, then the most recent within each severity.
+    private List<AlertView> Alerts => AlertDetails
+        .Select(d => Sensors.FirstOrDefault(s => s.Id == d.SensorId) is { } sensor ? new AlertView(sensor, d.Value, d.Priority, d.Timestamp) : null)
+        .OfType<AlertView>()
+        .OrderBy(a => a.Priority)
+        .ThenByDescending(a => a.Timestamp)
+        .ToList();
+
+    private Task AcknowledgeAsync(Guid sensorId) => PostAsync($"api/alerts/{sensorId}/resolve");
+
+    private Task AcknowledgeAllAsync() => PostAsync("api/alerts/acknowledge-all");
+
+    private async Task PostAsync(string url)
     {
-        get
-        {
-            var views = new List<AlertView>();
-            foreach (var id in ActiveAlertIds)
-            {
-                var sensor = Sensors.FirstOrDefault(s => s.Id == id);
-                if (sensor is null)
-                {
-                    continue;
-                }
+        _isBusy = true;
+        _error = null;
 
-                views.Add(new AlertView(sensor.Id, sensor.MacAddress, sensor.Location, sensor.Category));
-            }
-
-            return views;
-        }
-    }
-
-    private async Task ResolveAsync(Guid sensorId)
-    {
         try
         {
-            var response = await Http.PostAsync($"api/alerts/{sensorId}/resolve", null);
+            var response = await Http.PostAsync(url, null);
             if (response.IsSuccessStatusCode)
             {
                 await OnAlertResolved.InvokeAsync();
+            }
+            else
+            {
+                _error = "The gateway did not accept the acknowledgement. Try again.";
             }
         }
         catch (HttpRequestException)
         {
             // The alert stays listed and the next poll shows the true state, so the operator can simply retry.
+            _error = "Could not acknowledge - gateway unreachable.";
+        }
+        finally
+        {
+            _isBusy = false;
         }
     }
 }

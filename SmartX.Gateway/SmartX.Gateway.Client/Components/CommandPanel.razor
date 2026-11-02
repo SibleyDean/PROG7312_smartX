@@ -1,6 +1,7 @@
 @implements IDisposable
 @using SmartX.Gateway.Shared.DataStructures
 @using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
 @using System.Text
 @using System.Text.Json
 @inject HttpClient Http
@@ -12,9 +13,18 @@
     </header>
 
     <div>
+        @if (Sensors.Count == 0)
+        {
+            <div class="empty-state">
+                <span>No devices to control yet. <a class="inline-link" href="dashboard">Load demo sensors on the Sensors page</a>, then come back here to send commands.</span>
+            </div>
+        }
+
         <div class="command-field">
             <label class="mono-label" for="device-search">Search Devices</label>
-            <input id="device-search" class="command-input" value="@_searchQuery" @oninput="OnSearchInput" />
+            <input id="device-search" class="command-input" type="search" value="@_searchQuery" @oninput="OnSearchInput"
+                   placeholder="e.g. Boiler, Line 2, 1B:44:A3, Actuator" aria-describedby="device-search-hint" />
+            <span id="device-search-hint" class="hint-text">Matches MAC address, location, category or reading type.</span>
         </div>
 
         <div class="command-field">
@@ -37,28 +47,59 @@
 
         <div class="command-field">
             <label class="mono-label" for="target-device">Target Device</label>
-            <select id="target-device" class="command-select" @bind="_selectedSensorId">
+            <select id="target-device" class="command-select" value="@(_selectedSensorId?.ToString() ?? string.Empty)" @onchange="OnDeviceChanged" @ref="_deviceSelect">
                 <option value="">@(Sensors.Count == 0 ? "No devices available" : "Select a device")</option>
                 @foreach (var sensor in FilteredSensors)
                 {
-                    <option value="@sensor.Id">@sensor.MacAddress - @sensor.Location</option>
+                    <option value="@sensor.Id">@sensor.MacAddress - @sensor.Location (@SensorReadingInfo.Describe(sensor.Category))</option>
                 }
             </select>
         </div>
 
-        <div class="command-button-grid">
-            <button class="command-action" disabled="@(_selectedSensorId is null)" @onclick='() => IssueCommand("OpenValve")'>Open Valve</button>
-            <button class="command-action" disabled="@(_selectedSensorId is null)" @onclick='() => IssueCommand("CloseValve")'>Close Valve</button>
-            <button class="command-action" disabled="@(_selectedSensorId is null)" @onclick='() => IssueCommand("ToggleRelay")'>Toggle Relay</button>
-            <button class="command-action" disabled="@(_selectedSensorId is null)" @onclick='() => IssueCommand("RestartSensor")'>Restart Sensor</button>
-        </div>
+        @if (SelectedSensor is { } target)
+        {
+            <p class="hint-text" style="margin-bottom: 0.5rem;">Commands for this @SensorReadingInfo.Describe(target.Category).ToLowerInvariant() device (@target.Category):</p>
+            <div class="command-button-grid">
+                @foreach (var commandType in CommandCatalog.For(target.Category))
+                {
+                    <button class="command-action" disabled="@_isSending" title="@CommandCatalog.Explain(commandType)" @onclick="() => IssueCommand(commandType)">@CommandCatalog.Label(commandType)</button>
+                }
+            </div>
+        }
+        else if (Sensors.Count > 0)
+        {
+            <p class="hint-text" style="margin-bottom: 1rem;">Choose a target device to see the commands it supports.</p>
+        }
 
-        <button class="ghost-button" @onclick="UndoLastCommand">Undo Last Command</button>
+        @{ var lastCommand = CommandHistory.FirstOrDefault(); }
+        <button class="ghost-button" disabled="@(lastCommand is null || _isSending)" @onclick="UndoLastCommand">
+            @(lastCommand is null ? "Nothing to undo" : $"Undo: {CommandCatalog.Label(lastCommand.CommandType)} on {lastCommand.DeviceMac}")
+        </button>
 
         <div role="status">
             @if (_inlineMessage is not null)
             {
                 <p @key="_statusKey">@_inlineMessage</p>
+            }
+        </div>
+
+        <div class="recent-commands" aria-labelledby="recent-commands-title">
+            <span class="mono-label" id="recent-commands-title">Recent commands</span>
+            @if (CommandHistory.Count == 0)
+            {
+                <p class="hint-text">No commands sent yet. Pick a device above and choose a command.</p>
+            }
+            else
+            {
+                @foreach (var command in CommandHistory.Take(10))
+                {
+                    <div class="recent-command-row" @key="command.Id">
+                        <span class="feed-row-time" title="@TimeDisplay.Full(command.IssuedAt)">@TimeDisplay.Clock(command.IssuedAt)</span>
+                        <span>@CommandCatalog.Label(command.CommandType) &middot; <span class="mono-data">@command.DeviceMac</span></span>
+                        <span></span>
+                        <span class="feed-row-sub">@LocationOf(command.DeviceMac)</span>
+                    </div>
+                }
             }
         </div>
     </div>
@@ -69,21 +110,59 @@
     [Parameter] public HashSet<Guid> ActiveAlertIds { get; set; } = new();
     [Parameter] public EventCallback OnCommandIssued { get; set; }
 
+    // Newest first, as returned by GET api/commands/history.
+    [Parameter] public IReadOnlyList<ManualCommand> CommandHistory { get; set; } = Array.Empty<ManualCommand>();
+
+    // Owned by the page so alerts and insights can pick a device for the operator.
+    [Parameter] public Guid? SelectedSensorId { get; set; }
+    [Parameter] public EventCallback<Guid?> SelectedSensorIdChanged { get; set; }
+
     private string _searchQuery = string.Empty;
     private Guid? _selectedSensorId;
     private string? _inlineMessage;
     private int _statusKey;
+    private bool _isSending;
+    private ElementReference _deviceSelect;
     private CancellationTokenSource? _searchDebounceCts;
     private HashSet<SensorCategory> _activeCategories = new();
     private bool _alertedOnly;
 
+    private SensorProfile? SelectedSensor => Sensors.FirstOrDefault(s => s.Id == _selectedSensorId);
+
     private IEnumerable<SensorProfile> FilteredSensors => Sensors.Where(s =>
         s.Id == _selectedSensorId
-        || ((string.IsNullOrWhiteSpace(_searchQuery)
-                || s.MacAddress.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase)
-                || s.Category.ToString().Contains(_searchQuery, StringComparison.OrdinalIgnoreCase))
+        || (SensorSearch.Matches(s, _searchQuery)
             && (_activeCategories.Count == 0 || _activeCategories.Contains(s.Category))
             && (!_alertedOnly || ActiveAlertIds.Contains(s.Id))));
+
+    protected override void OnParametersSet()
+    {
+        _selectedSensorId = SelectedSensorId;
+    }
+
+    // Moves keyboard focus (and scrolls) to the device picker after another panel selects a device.
+    public async Task FocusDeviceSelectAsync()
+    {
+        try
+        {
+            await _deviceSelect.FocusAsync();
+        }
+        catch (InvalidOperationException)
+        {
+            // The select has not been rendered yet; the selection itself has still been applied.
+        }
+    }
+
+    private async Task OnDeviceChanged(ChangeEventArgs e)
+    {
+        _selectedSensorId = Guid.TryParse(e.Value?.ToString(), out var id) ? id : null;
+        await SelectedSensorIdChanged.InvokeAsync(_selectedSensorId);
+    }
+
+    private string LocationOf(string mac) =>
+        Sensors.FirstOrDefault(s => string.Equals(s.MacAddress, mac, StringComparison.OrdinalIgnoreCase))?.Location ?? "Device no longer registered";
+
+    private string DeviceName(string mac) => $"{LocationOf(mac)} ({mac})";
 
     private void ToggleCategory(SensorCategory category)
     {
@@ -103,13 +182,14 @@
     private async Task OnSearchInput(ChangeEventArgs e)
     {
         _searchQuery = e.Value?.ToString() ?? string.Empty;
+        var query = _searchQuery.Trim();
 
         _searchDebounceCts?.Cancel();
         _searchDebounceCts?.Dispose();
         _searchDebounceCts = new CancellationTokenSource();
         var token = _searchDebounceCts.Token;
 
-        if (_searchQuery.Trim().Length < 2)
+        if (query.Length < 2)
         {
             return;
         }
@@ -125,7 +205,7 @@
 
         try
         {
-            using var content = new StringContent(JsonSerializer.Serialize(_searchQuery), Encoding.UTF8, "application/json");
+            using var content = new StringContent(JsonSerializer.Serialize(query), Encoding.UTF8, "application/json");
             await Http.PostAsync("api/insights/search", content);
         }
         catch (HttpRequestException)
@@ -136,12 +216,13 @@
 
     private async Task IssueCommand(string commandType)
     {
-        var sensor = Sensors.FirstOrDefault(s => s.Id == _selectedSensorId);
-        if (sensor is null)
+        var sensor = SelectedSensor;
+        if (sensor is null || _isSending)
         {
             return;
         }
 
+        _isSending = true;
         var command = new ManualCommand(Guid.Empty, sensor.MacAddress, commandType, null, DateTime.UtcNow);
 
         try
@@ -154,15 +235,19 @@
                 return;
             }
 
-            _inlineMessage = $"{commandType} sent to {sensor.MacAddress}.";
+            var effect = commandType == CommandCatalog.ToggleRelay ? "" : " Its new reading appears in the live feed within a few seconds.";
+            _inlineMessage = $"{CommandCatalog.Label(commandType)} sent to {DeviceName(sensor.MacAddress)}.{effect}";
             _statusKey++;
-            _selectedSensorId = null;
         }
         catch (HttpRequestException)
         {
             _inlineMessage = "Command could not be sent. Check the gateway connection.";
             _statusKey++;
             return;
+        }
+        finally
+        {
+            _isSending = false;
         }
 
         try
@@ -181,6 +266,7 @@
     private async Task UndoLastCommand()
     {
         string message;
+        _isSending = true;
 
         try
         {
@@ -188,7 +274,9 @@
             if (response.IsSuccessStatusCode)
             {
                 var undone = await response.Content.ReadFromJsonAsync<ManualCommand>();
-                message = $"Undid {undone?.CommandType} on {undone?.DeviceMac}.";
+                message = undone is null
+                    ? "Last command undone."
+                    : $"Undid {CommandCatalog.Label(undone.CommandType)} on {DeviceName(undone.DeviceMac)}.";
                 await OnCommandIssued.InvokeAsync();
             }
             else
@@ -199,6 +287,10 @@
         catch (HttpRequestException)
         {
             message = "Undo failed. Check the gateway connection.";
+        }
+        finally
+        {
+            _isSending = false;
         }
 
         _inlineMessage = message;

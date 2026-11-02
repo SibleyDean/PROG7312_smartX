@@ -1,10 +1,12 @@
 @page "/command-stream"
 @rendermode InteractiveWebAssembly
 @implements IDisposable
+@using SmartX.Gateway.Shared.DataStructures
 @using SmartX.Gateway.Shared.Models
 @using SmartX.Gateway.Shared.Services
 @using SmartX.Gateway.Client.Components
 @inject HttpClient Http
+@inject NavigationManager Navigation
 
 <PageTitle>Smart-X | Command Stream</PageTitle>
 
@@ -12,9 +14,9 @@
     <div>
         <h1>Command Stream</h1>
         <div class="filter-chips">
-            @if (_loadError is not null)
+            @if (_isDisconnected)
             {
-                <span class="mono-label accent-text">Offline</span>
+                <span class="mono-label critical-text">Disconnected - retrying</span>
             }
             else if (_isLoading)
             {
@@ -27,11 +29,26 @@
             <span class="mono-label">@(_sensors?.Count ?? 0) sensors</span>
             <span class="mono-label">Polling every 3s</span>
         </div>
-        @if (_loadError is not null)
+        @if (_isDisconnected)
         {
-            <p class="accent-text" role="alert">@_loadError</p>
+            <p class="connection-banner" role="alert">
+                @if (_lastSuccessUtc is DateTime lastSuccess)
+                {
+                    <text>Disconnected - retrying every 3 seconds. Showing data from the last successful update at @TimeDisplay.Clock(lastSuccess).</text>
+                }
+                else
+                {
+                    <text>Disconnected - retrying every 3 seconds. The gateway has not answered yet; check that it is running.</text>
+                }
+            </p>
         }
     </div>
+
+    @if (!_isLoading && _lastSuccessUtc is not null)
+    {
+        <HealthSummaryBar Sensors="@(_sensors ?? new())" ConnectionIssues="_connectionIssues" />
+    }
+    <StatusLegend />
 
     <div class="command-layout @(_panelsEntered ? "panels-entered" : "")">
         @if (_isLoading)
@@ -62,24 +79,25 @@
                 <div class="empty-state" role="status">Loading insights...</div>
             </div>
         }
-        else if (_loadError is not null)
+        else if (_lastSuccessUtc is null)
         {
             <div class="feed-panel">
                 <header class="panel-header">
                     <h3>Incoming Telemetry</h3>
-                    <span class="mono-label accent-text">No signal</span>
+                    <span class="mono-label critical-text">No signal</span>
                 </header>
-                <div class="empty-state">Gateway unreachable. The telemetry stream resumes automatically on the next successful poll.</div>
+                <div class="empty-state">Gateway unreachable. Readings appear here automatically as soon as it responds. If this persists, check that the gateway is running.</div>
             </div>
 
-            <CommandPanel Sensors="@(_sensors ?? new())" ActiveAlertIds="_activeAlertIds" OnCommandIssued="HandleCommandIssued" />
+            <CommandPanel @ref="_commandPanel" Sensors="@(_sensors ?? new())" ActiveAlertIds="_activeAlertIds" CommandHistory="_commandHistory"
+                          @bind-SelectedSensorId="_selectedSensorId" OnCommandIssued="RefreshAsync" />
 
             <div class="alerts-panel">
                 <header class="panel-header">
                     <h3>Active Alerts</h3>
                     <span class="mono-label">--</span>
                 </header>
-                <div class="empty-state">Alert set unavailable. Alert state cannot be confirmed while the gateway is offline.</div>
+                <div class="empty-state">Alert state cannot be confirmed while the gateway is offline. Alerts reload with the next successful update.</div>
             </div>
 
             <div class="insights-panel">
@@ -87,15 +105,17 @@
                     <h3>Automated Insights</h3>
                     <span class="mono-label">--</span>
                 </header>
-                <div class="empty-state">Insights unavailable. Suggestions reload with the next successful poll.</div>
+                <div class="empty-state">Insights unavailable. Suggestions reload with the next successful update.</div>
             </div>
         }
         else
         {
-            <TelemetryFeed Sensors="@(_sensors ?? new())" NewReadingIds="_newReadingIds" IsLoading="_isLoading" />
-            <CommandPanel Sensors="@(_sensors ?? new())" ActiveAlertIds="_activeAlertIds" OnCommandIssued="HandleCommandIssued" />
-            <AlertsPanel Sensors="@(_sensors ?? new())" ActiveAlertIds="_activeAlertIds" OnAlertResolved="HandleAlertResolved" />
-            <InsightsPanel Insights="@(_insights ?? new())" />
+            <TelemetryFeed Sensors="@(_feedSensors ?? new())" NewReadingIds="_newReadingIds" IsLoading="_isLoading"
+                           IsPaused="_feedPaused" PendingCount="_pendingCount" OnTogglePause="ToggleFeedPause" />
+            <CommandPanel @ref="_commandPanel" Sensors="@(_sensors ?? new())" ActiveAlertIds="_activeAlertIds" CommandHistory="_commandHistory"
+                          @bind-SelectedSensorId="_selectedSensorId" OnCommandIssued="RefreshAsync" />
+            <AlertsPanel Sensors="@(_sensors ?? new())" AlertDetails="_alertDetails" OnAlertResolved="RefreshAsync" OnSendCommand="SelectDevice" />
+            <InsightsPanel Insights="@(_insights ?? new())" Sensors="@(_sensors ?? new())" OnCommandIssued="RefreshAsync" OnSelectDevice="SelectDevice" />
         }
     </div>
 </div>
@@ -103,13 +123,29 @@
 @code {
     private List<SensorProfile>? _sensors;
     private List<ActionInsight>? _insights;
+    private List<AlertDetail> _alertDetails = new();
+    private List<ManualCommand> _commandHistory = new();
+    private HashSet<Guid> _activeAlertIds = new();
+    private const int FeedReadingsPerSensor = 20;
+
+    private List<string> _connectionIssues = new();
     private System.Threading.Timer? _pollTimer;
     private bool _isRefreshing;
-    private readonly HashSet<string> _knownReadingIds = new();
-    private readonly HashSet<string> _newReadingIds = new();
-    private HashSet<Guid> _activeAlertIds = new();
+    private bool _refreshQueued;
     private bool _isLoading = true;
-    private string? _loadError;
+    private bool _isDisconnected;
+    private DateTime? _lastSuccessUtc;
+
+    // The feed shows its own snapshot so it can be paused while everything else keeps updating.
+    private List<SensorProfile>? _feedSensors;
+    private HashSet<string> _displayedReadingIds = new();
+    private readonly HashSet<string> _newReadingIds = new();
+    private bool _feedPaused;
+    private int _pendingCount;
+
+    private Guid? _selectedSensorId;
+    private CommandPanel? _commandPanel;
+    private bool _focusCommandPanel;
 
     // Pre-rendered HTML gets no interactive render to add the class, so it must ship visible.
     private bool _panelsEntered = !OperatingSystem.IsBrowser();
@@ -117,35 +153,30 @@
     protected override async Task OnInitializedAsync()
     {
         _isLoading = true;
+        await LoadAsync();
+        _isLoading = false;
 
-        try
+        // command-stream?device=<sensorId> (from the Topology page) preselects that device in Manual Override.
+        if (DeviceFromQuery() is Guid deviceId && (_sensors?.Any(s => s.Id == deviceId) ?? false))
         {
-            _sensors = await Http.GetFromJsonAsync<List<SensorProfile>>("api/sensors") ?? new();
-            _insights = await Http.GetFromJsonAsync<List<ActionInsight>>("api/insights/suggested") ?? new();
-            _activeAlertIds = new HashSet<Guid>(await Http.GetFromJsonAsync<List<Guid>>("api/alerts/active") ?? new());
+            SelectDevice(deviceId);
         }
-        catch (HttpRequestException)
-        {
-            _sensors ??= new();
-            _insights ??= new();
-            _loadError = "could not reach the gateway - retrying in background";
-        }
-        finally
-        {
-            _isLoading = false;
-        }
-
-        _knownReadingIds.UnionWith((_sensors ?? new()).SelectMany(s => s.HistoricalTelemetry.Select(r => $"{s.Id}-{r.Timestamp.Ticks}")));
 
         // OnInitializedAsync also runs during server pre-render; polling only makes sense in the live WASM instance.
         if (OperatingSystem.IsBrowser())
         {
-            _pollTimer = new System.Threading.Timer(async _ => await RefreshAsync(), null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+            _pollTimer = new System.Threading.Timer(async _ => await PollAsync(), null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
         }
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (_focusCommandPanel && _commandPanel is not null)
+        {
+            _focusCommandPanel = false;
+            await _commandPanel.FocusDeviceSelectAsync();
+        }
+
         if (!firstRender)
         {
             _newReadingIds.Clear();
@@ -163,46 +194,9 @@
         StateHasChanged();
     }
 
-    private Task HandleCommandIssued() => RefreshAsync();
-
-    private Task HandleAlertResolved() => RefreshAsync();
-
-    private async Task RefreshAsync()
+    private async Task PollAsync()
     {
-        if (_isRefreshing)
-        {
-            return;
-        }
-
-        _isRefreshing = true;
-
-        try
-        {
-            var sensors = await Http.GetFromJsonAsync<List<SensorProfile>>("api/sensors") ?? new();
-            var insights = await Http.GetFromJsonAsync<List<ActionInsight>>("api/insights/suggested") ?? new();
-            var alertIds = await Http.GetFromJsonAsync<List<Guid>>("api/alerts/active") ?? new();
-
-            var freshIds = sensors.SelectMany(s => s.HistoricalTelemetry.Select(r => $"{s.Id}-{r.Timestamp.Ticks}")).ToList();
-            _newReadingIds.UnionWith(freshIds.Where(id => !_knownReadingIds.Contains(id)));
-            _sensors = sensors;
-            _insights = insights;
-            _activeAlertIds = new HashSet<Guid>(alertIds);
-            _knownReadingIds.UnionWith(freshIds);
-
-            if (_loadError is not null)
-            {
-                _loadError = null;
-            }
-        }
-        catch (HttpRequestException)
-        {
-            // A failed background poll is retried on the next tick; reporting it would repeat every 3 seconds.
-            return;
-        }
-        finally
-        {
-            _isRefreshing = false;
-        }
+        await RefreshAsync();
 
         // A tick already in flight when the component is disposed must not render into a torn-down component.
         if (_pollTimer is not null)
@@ -210,6 +204,115 @@
             await InvokeAsync(StateHasChanged);
         }
     }
+
+    // A command, acknowledgement or undo that finishes while a poll is in flight queues one more refresh straight after it,
+    // so its result is never hidden behind data fetched before it happened. Public so tests can drive a poll.
+    public async Task RefreshAsync()
+    {
+        if (_isRefreshing)
+        {
+            _refreshQueued = true;
+            return;
+        }
+
+        _isRefreshing = true;
+
+        try
+        {
+            do
+            {
+                _refreshQueued = false;
+                await LoadAsync();
+            }
+            while (_refreshQueued);
+        }
+        finally
+        {
+            _isRefreshing = false;
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            // The feed shows the newest 20 readings overall, so 20 per sensor is always enough and keeps each poll small.
+            var sensorsTask = Http.GetFromJsonAsync<List<SensorProfile>>($"api/sensors?readings={FeedReadingsPerSensor}");
+            var insightsTask = Http.GetFromJsonAsync<List<ActionInsight>>("api/insights/suggested");
+            var alertsTask = Http.GetFromJsonAsync<List<AlertDetail>>("api/alerts/details");
+            var historyTask = Http.GetFromJsonAsync<List<ManualCommand>>("api/commands/history");
+            var summaryTask = Http.GetFromJsonAsync<GatewaySummary>("api/summary");
+            await Task.WhenAll(sensorsTask, insightsTask, alertsTask, historyTask, summaryTask);
+
+            _sensors = sensorsTask.Result ?? new();
+            _insights = insightsTask.Result ?? new();
+            _alertDetails = alertsTask.Result ?? new();
+            _activeAlertIds = new HashSet<Guid>(_alertDetails.Select(a => a.SensorId));
+            _commandHistory = historyTask.Result ?? new();
+            _connectionIssues = summaryTask.Result?.ConnectionIssues ?? new();
+            _lastSuccessUtc = DateTime.UtcNow;
+            _isDisconnected = false;
+
+            var freshIds = ReadingIds(_sensors);
+            if (_feedSensors is null)
+            {
+                // The first snapshot is the baseline; nothing in it counts as newly arrived.
+                _feedSensors = _sensors;
+                _displayedReadingIds = freshIds;
+            }
+            else if (_feedPaused)
+            {
+                _pendingCount = freshIds.Count(id => !_displayedReadingIds.Contains(id));
+            }
+            else
+            {
+                ShowLatestInFeed(freshIds);
+            }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            // Polling retries on its own; the banner tells the operator, so the error is not rethrown every 3 seconds.
+            _isDisconnected = true;
+        }
+    }
+
+    private void ShowLatestInFeed(HashSet<string> freshIds)
+    {
+        _newReadingIds.UnionWith(freshIds.Where(id => !_displayedReadingIds.Contains(id)));
+        _feedSensors = _sensors;
+        _displayedReadingIds = freshIds;
+        _pendingCount = 0;
+    }
+
+    private void ToggleFeedPause()
+    {
+        if (_feedPaused)
+        {
+            _feedPaused = false;
+            ShowLatestInFeed(ReadingIds(_sensors ?? new()));
+        }
+        else
+        {
+            _feedPaused = true;
+            _pendingCount = 0;
+        }
+    }
+
+    private Guid? DeviceFromQuery()
+    {
+        var query = new Uri(Navigation.Uri).Query;
+        var value = System.Web.HttpUtility.ParseQueryString(query)["device"];
+        return Guid.TryParse(value, out var id) ? id : null;
+    }
+
+    private void SelectDevice(Guid sensorId)
+    {
+        _selectedSensorId = sensorId;
+        _focusCommandPanel = true;
+    }
+
+    private static HashSet<string> ReadingIds(IEnumerable<SensorProfile> sensors) =>
+        sensors.SelectMany(s => s.HistoricalTelemetry.Select(r => $"{s.Id}-{r.Timestamp.Ticks}")).ToHashSet();
 
     public void Dispose()
     {

@@ -1,7 +1,1062 @@
 @page "/topology"
 @rendermode InteractiveWebAssembly
+@implements IDisposable
+@using System.Globalization
+@using SmartX.Gateway.Shared.DataStructures
+@using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
+@using SmartX.Gateway.Client.Components
+@inject HttpClient Http
 
-<div class="section" style="padding-top: 8rem;">
-    <h1>Network Topology</h1>
-    <span class="mono-label">// Reserved for final PoE implementation</span>
+<PageTitle>Smart-X | Topology</PageTitle>
+
+@{
+    var views = Views;
+    var byMac = views.ToDictionary(v => v.Mac, StringComparer.OrdinalIgnoreCase);
+    var selected = _selectedMac is not null && byMac.TryGetValue(_selectedMac, out var found) ? found : null;
+    var sensorViews = views.Where(v => v.IsSensor).ToList();
+    var problemCount = views.Count(v => v.IsProblem);
+    var filtering = SensorSearch.Normalise(_search).Length > 0 || _problemsOnly;
+}
+
+<div class="section">
+    <div>
+        <h1>Mesh Topology</h1>
+        <p>How every sensor connects to the gateway, and where problems are.</p>
+        <div class="filter-chips">
+            @if (_isDisconnected)
+            {
+                <span class="mono-label critical-text">Disconnected - retrying</span>
+            }
+            else if (_topology is null)
+            {
+                <span class="mono-label">Connecting</span>
+            }
+            else if (_paused)
+            {
+                <span class="mono-label warning-text">Paused - map updates on hold</span>
+            }
+            else
+            {
+                <span class="mono-label accent-text"><span class="nav-active-dot" aria-hidden="true"></span>Live</span>
+            }
+            @if (_topology is not null)
+            {
+                <span class="mono-label">@sensorViews.Count sensors &middot; @views.Count(v => v.IsRouter) routers</span>
+                <span class="mono-label @(problemCount > 0 ? "critical-text" : "")">@problemCount @(problemCount == 1 ? "problem" : "problems")</span>
+                <span class="mono-label">Syncing every 5s</span>
+            }
+        </div>
+        @if (_isDisconnected)
+        {
+            <p class="connection-banner" role="alert">
+                @if (_lastSuccessUtc is DateTime lastSuccess)
+                {
+                    <text>Disconnected - retrying every 5 seconds. Showing the map from the last successful update at @TimeDisplay.Clock(lastSuccess).</text>
+                }
+                else
+                {
+                    <text>Disconnected - retrying every 5 seconds. The gateway has not answered yet; check that it is running.</text>
+                }
+            </p>
+        }
+    </div>
+
+    @if (_topology is not null && !sensorViews.Any(v => v.Node.Source is SensorSource.Seeded or SensorSource.Manual))
+    {
+        <div class="panel topology-notice">
+            <div class="sim-row">
+                <p class="hint-text">
+                    Only the @sensorViews.Count fixed mesh sensors are on the map. Load demo sensors to fill the factory -
+                    each one joins the router for its area. You can also do this from the <a class="inline-link" href="dashboard">Sensors page</a>.
+                </p>
+                <button class="accent-button" disabled="@_isSeeding" @onclick="LoadDemoSensorsAsync">@(_isSeeding ? "Loading..." : "Load demo sensors")</button>
+            </div>
+        </div>
+    }
+
+    @if (sensorViews.Count > 0 && sensorViews.All(v => v.State is NodeState.Offline or NodeState.NoRoute))
+    {
+        <div class="panel topology-notice critical-notice" role="status">
+            <div class="sim-row">
+                <p>
+                    No sensor can reach the gateway right now, so no readings are arriving. Bring the offline nodes back
+                    to restore the network.
+                </p>
+                <button class="accent-button" disabled="@_isRestoring" @onclick="RestoreAllAsync">@(_isRestoring ? "Restoring..." : "Restore all nodes")</button>
+            </div>
+        </div>
+    }
+
+    <div class="topology-toolbar">
+        <div class="command-field">
+            <label class="mono-label" for="map-search">Find on map</label>
+            <input id="map-search" class="command-input" type="search" placeholder="e.g. Boiler, Line 2, 1B:44:A3, Actuator"
+                   aria-describedby="map-search-hint" @bind="_search" @bind:event="oninput" />
+            <span id="map-search-hint" class="hint-text">Matches MAC address, location, category or reading type; others are dimmed.</span>
+        </div>
+        <label class="toggle">
+            <input type="checkbox" checked="@_problemsOnly" @onchange="e => _problemsOnly = e.Value is true" />
+            Show problems only
+        </label>
+        <div class="filter-chips" role="group" aria-label="View" style="margin-bottom: 0;">
+            <button class="filter-chip @(_listView ? "" : "active")" aria-pressed="@(_listView ? "false" : "true")" @onclick="() => _listView = false">Map</button>
+            <button class="filter-chip @(_listView ? "active" : "")" aria-pressed="@(_listView ? "true" : "false")" @onclick="() => _listView = true">List</button>
+        </div>
+        <button class="ghost-button" aria-pressed="@(_paused ? "true" : "false")" disabled="@(_topology is null)" @onclick="TogglePause">@(_paused ? "Resume updates" : "Pause updates")</button>
+        <button class="ghost-button" disabled="@(_topology is null || _isValidating)" @onclick="ValidateNetworkAsync">@(_isValidating ? "Validating..." : "Validate network")</button>
+    </div>
+
+    <div role="status">
+        @if (_validation is not null)
+        {
+            <div class="validation-result @(_validation.IsValid ? "pass" : "fail")">
+                @if (_validation.IsValid)
+                {
+                    <p><strong>✓ Network valid.</strong> All @_validation.NodesChecked nodes have a name, a zone, and sit under the router for their area.</p>
+                }
+                else
+                {
+                    <p><strong>✕ Validation failed:</strong> @_validation.Issues.Count @(_validation.Issues.Count == 1 ? "problem" : "problems") in @_validation.NodesChecked nodes. Failing nodes are outlined in red on the map.</p>
+                    <ul>
+                        @foreach (var issue in _validation.Issues)
+                        {
+                            var name = byMac.TryGetValue(issue.NodeId, out var issueView) ? $"{issueView.Name} ({issue.NodeId})" : issue.NodeId;
+                            <li>@name: @issue.Reason</li>
+                        }
+                    </ul>
+                }
+                <button class="ghost-button" @onclick="ClearValidation">Dismiss</button>
+            </div>
+        }
+        @if (_actionError is not null)
+        {
+            <p class="hint-text critical-text">@_actionError</p>
+        }
+    </div>
+
+    <div class="topology-layout">
+        <div class="panel topology-canvas-panel">
+            <header class="panel-header">
+                <h3>@(_listView ? "Network List" : "Network Map")</h3>
+                <span class="mono-label">Select a node to see its details and route</span>
+            </header>
+
+            @if (_topology is null)
+            {
+                <div class="topology-canvas topology-canvas-loading" aria-busy="true">
+                    <div class="empty-state" role="status">@(_isDisconnected ? "Mesh map unavailable until the gateway responds." : "Mapping the mesh...")</div>
+                </div>
+            }
+            else if (_listView)
+            {
+                <TopologyList Views="views" SelectedMac="_selectedMac" CollapsedAreas="_collapsedAreas" Filtering="filtering"
+                              OnSelect="SelectNodeAsync" OnToggleArea="ToggleArea" />
+            }
+            else
+            {
+                <svg class="topology-canvas" viewBox="0 0 @Svg(CanvasWidth) @Svg(CanvasHeight)" role="group" aria-label="Mesh network map">
+                    @foreach (var edge in _topology.Edges.Where(e => !IsRouteEdge(e)))
+                    {
+                        var (x1, y1) = Project(edge.SourceMac);
+                        var (x2, y2) = Project(edge.DestinationMac);
+                        <line class="mesh-edge @EdgeClass(edge, byMac)" x1="@Svg(x1)" y1="@Svg(y1)" x2="@Svg(x2)" y2="@Svg(y2)" />
+                    }
+
+                    @foreach (var edge in _topology.Edges.Where(IsRouteEdge))
+                    {
+                        var (x1, y1) = Project(edge.SourceMac);
+                        var (x2, y2) = Project(edge.DestinationMac);
+                        <line class="mesh-edge route" x1="@Svg(x1)" y1="@Svg(y1)" x2="@Svg(x2)" y2="@Svg(y2)" />
+                    }
+
+                    @foreach (var view in views.OrderBy(v => v.IsSensor ? 0 : 1))
+                    {
+                        var (cx, cy) = Project(view.Mac);
+                        var radius = view.IsGateway ? GatewayRadius : view.IsRouter ? RouterRadius : SensorRadius;
+                        var isSelected = IsSameMac(view.Mac, _selectedMac);
+                        <g class="mesh-node role-@RoleClass(view) state-@view.State.ToString().ToLowerInvariant() @(isSelected ? "selected" : "") @(IsOnRoute(view.Mac) ? "on-route" : "") @(view.IsMatch ? "match" : "") @(view.IsDimmed ? "dimmed" : "") @(view.IsInvalid ? "invalid" : "")"
+                           @key="view.Mac"
+                           role="button"
+                           tabindex="0"
+                           aria-pressed="@(isSelected ? "true" : "false")"
+                           aria-label="@view.Description"
+                           @onclick="() => SelectNodeAsync(view.Mac)"
+                           @onkeydown="e => HandleNodeKeyAsync(e, view.Mac)"
+                           @onfocus="() => _hoverMac = view.Mac"
+                           @onblur="() => ClearHover(view.Mac)"
+                           @onmouseover="() => _hoverMac = view.Mac"
+                           @onmouseout="() => ClearHover(view.Mac)">
+                            <title>@view.Description</title>
+                            <circle class="mesh-node-hit" cx="@Svg(cx)" cy="@Svg(cy)" r="@Svg(radius + 8)" />
+                            <circle class="mesh-node-ring" cx="@Svg(cx)" cy="@Svg(cy)" r="@Svg(radius + 5)" />
+                            <circle class="mesh-node-body" cx="@Svg(cx)" cy="@Svg(cy)" r="@Svg(radius)" />
+                            @if (view.State == NodeState.Offline)
+                            {
+                                var arm = radius * 0.45;
+                                <line class="mesh-node-cross" x1="@Svg(cx - arm)" y1="@Svg(cy - arm)" x2="@Svg(cx + arm)" y2="@Svg(cy + arm)" />
+                                <line class="mesh-node-cross" x1="@Svg(cx - arm)" y1="@Svg(cy + arm)" x2="@Svg(cx + arm)" y2="@Svg(cy - arm)" />
+                            }
+                            else if (view.IsSensor || view.State == NodeState.NoRoute)
+                            {
+                                <g><text class="mesh-node-glyph" x="@Svg(cx)" y="@Svg(cy + 3.5)">@view.Glyph</text></g>
+                            }
+                            @if (view.Alert is not null)
+                            {
+                                var bx = cx + radius * 0.75;
+                                var by = cy - radius * 0.75;
+                                <path class="mesh-alert-badge" d="M @Svg(bx) @Svg(by - 6) L @Svg(bx + 6) @Svg(by + 4.5) L @Svg(bx - 6) @Svg(by + 4.5) Z" />
+                            }
+                            @if (view.IsRouter)
+                            {
+                                var (lx, ly, anchor) = RouterLabelPosition(cx, cy, radius);
+                                <g><text class="mesh-node-label area-label" x="@Svg(lx)" y="@Svg(ly)" style="text-anchor: @anchor">@view.ShortLabel</text></g>
+                                @if (view.IssuesDownstream > 0)
+                                {
+                                    <g><text class="mesh-node-label rollup-label" x="@Svg(lx)" y="@Svg(ly + 12)" style="text-anchor: @anchor">@view.IssuesDownstream @(view.IssuesDownstream == 1 ? "issue" : "issues")</text></g>
+                                }
+                            }
+                            else
+                            {
+                                <g><text class="mesh-node-label" x="@Svg(cx)" y="@Svg(cy + radius + (view.IsGateway ? 16 : 11))">@view.ShortLabel</text></g>
+                                @if (view.IsGateway && view.IssuesDownstream > 0)
+                                {
+                                    <g><text class="mesh-node-label rollup-label" x="@Svg(cx)" y="@Svg(cy + radius + 28)">@TopologyView.IssuesText(view.IssuesDownstream)</text></g>
+                                }
+                            }
+                        </g>
+                    }
+                </svg>
+
+                @* On narrow screens the map is too small to read, so CSS swaps in the same data as a list. *@
+                <div class="topology-list-fallback">
+                    <p class="hint-text">The map needs a wider screen, so the network is shown as a list.</p>
+                    <TopologyList Views="views" SelectedMac="_selectedMac" CollapsedAreas="_collapsedAreas" Filtering="filtering"
+                                  OnSelect="SelectNodeAsync" OnToggleArea="ToggleArea" />
+                </div>
+
+                <p class="map-focus-info" aria-live="polite">
+                    @if (_hoverMac is not null && byMac.TryGetValue(_hoverMac, out var hover))
+                    {
+                        @hover.Description
+                    }
+                    else
+                    {
+                        <span class="hint-text">Hover over or tab to a node to see its full name, MAC address and status.</span>
+                    }
+                </p>
+            }
+
+            @if (_topology is not null)
+            {
+                <TopologyLegend />
+            }
+        </div>
+
+        <div class="topology-side">
+            <div class="panel" aria-labelledby="node-detail-title">
+                <header class="panel-header">
+                    <h3 id="node-detail-title">@(selected?.Name ?? "Node Details")</h3>
+                    @if (selected is not null)
+                    {
+                        <NodeStatePill State="selected.State" Alert="selected.Alert" />
+                    }
+                </header>
+                @if (selected is null)
+                {
+                    <div class="empty-state">No node selected. Click a node on the map (or in the list) to see its reading, alerts and route.</div>
+                }
+                else if (selected.IsSensor)
+                {
+                    var category = selected.Node.Category ?? SensorCategory.Unknown;
+                    <div class="detail-heading">
+                        <span>@SensorReadingInfo.Describe(category) &middot; @category <SourceTag Source="selected.Node.Source" /></span>
+                        <span class="mono-label">@selected.Mac &middot; @selected.Node.Area router</span>
+                    </div>
+                    @if (selected.Node.LatestValue is double latest && selected.Node.LatestTimestamp is DateTime latestAt)
+                    {
+                        <p class="latest-reading">
+                            <span class="mono-data">@SensorReadingInfo.Format(latest, category)</span>
+                            <StatusPill Status="SensorReadingInfo.GetStatus(latest)" ShowNormal="true" />
+                            <span class="feed-row-time" title="@TimeDisplay.Full(latestAt)">at @TimeDisplay.Clock(latestAt) (@TimeDisplay.Relative(latestAt))</span>
+                        </p>
+                    }
+                    else
+                    {
+                        <p class="hint-text">No readings yet.</p>
+                    }
+                    @if (selected.State is NodeState.Offline or NodeState.NoRoute)
+                    {
+                        <p class="hint-text critical-text">
+                            @(selected.State == NodeState.Offline ? "This sensor is offline (simulated) and sends no readings." : "This sensor has no route to the gateway, so its readings cannot arrive.")
+                        </p>
+                    }
+                    <Sparkline Readings="SparklineReadings" Category="category" />
+                    @if (selected.Alert is AlertDetail alert)
+                    {
+                        var alertStatus = alert.Priority == 1 ? ReadingStatus.Critical : ReadingStatus.Warning;
+                        <div class="alert-row @alertStatus.ToString().ToLowerInvariant()">
+                            <div class="alert-main">
+                                <span><StatusPill Status="alertStatus" /> Open alert: @SensorReadingInfo.Format(alert.Value, category)</span>
+                                <span class="feed-row-time" title="@TimeDisplay.Full(alert.Timestamp)">@TimeDisplay.Relative(alert.Timestamp)</span>
+                            </div>
+                            <button class="ghost-button" disabled="@_isAcknowledging" title="Acknowledging clears an alert until that sensor's next warning or critical reading."
+                                    @onclick="() => AcknowledgeAsync(alert.SensorId)">Acknowledge</button>
+                        </div>
+                    }
+                    @if (selected.Node.SensorId is Guid sensorId)
+                    {
+                        <a class="ghost-button" href="command-stream?device=@sensorId">Send command</a>
+                    }
+                }
+                else
+                {
+                    var downstream = selected.IsGateway
+                        ? views.Where(v => v.IsProblem && v.Mac != selected.Mac).ToList()
+                        : views.Where(v => v.IsSensor && v.IsProblem && IsSameMac(v.Node.ParentMac, selected.Mac)).ToList();
+                    <p>
+                        @(selected.IsGateway
+                            ? "Every router and sensor sends its readings here."
+                            : $"Relays readings from the {views.Count(v => v.IsSensor && IsSameMac(v.Node.ParentMac, selected.Mac))} sensors in {selected.Node.Area} to the gateway.")
+                    </p>
+                    @if (downstream.Count == 0)
+                    {
+                        <p class="hint-text ok-text">✓ No issues downstream.</p>
+                    }
+                    else
+                    {
+                        <span class="mono-label critical-text">@TopologyView.IssuesText(downstream.Count)</span>
+                        <ul class="downstream-list">
+                            @foreach (var issue in downstream)
+                            {
+                                <li>
+                                    <button class="sort-button" @onclick="() => SelectNodeAsync(issue.Mac)">@issue.Name</button>
+                                    <NodeStatePill State="issue.State" Alert="issue.Alert" />
+                                </li>
+                            }
+                        </ul>
+                    }
+                }
+            </div>
+
+            <div class="panel" aria-live="polite">
+                <header class="panel-header">
+                    <h3>Routing Path</h3>
+                    @if (_activeRoute.Count > 1)
+                    {
+                        <span class="mono-label accent-text">@(_activeRoute.Count - 1) @(_activeRoute.Count == 2 ? "hop" : "hops")</span>
+                    }
+                </header>
+
+                @if (_selectedMac is null)
+                {
+                    <div class="empty-state">No node selected. Click any sensor on the map to trace its lowest-cost path to the gateway.</div>
+                }
+                else if (_isRouteLoading && _activeRoute.Count == 0)
+                {
+                    <div class="empty-state" role="status">Tracing route...</div>
+                }
+                else if (_routeError is not null)
+                {
+                    <div class="empty-state accent-text">@_routeError</div>
+                }
+                else if (selected?.IsGateway == true)
+                {
+                    <div class="empty-state">This is the gateway. Every sensor route terminates here.</div>
+                }
+                else if (_activeRoute.Count == 0)
+                {
+                    <div class="empty-state fault-text">No route to the gateway. @(selected?.Node.IsOffline == true ? "This node is offline." : "Every path out of this node passes through an offline node.")</div>
+                }
+                else
+                {
+                    @if (IsRerouted)
+                    {
+                        <p class="reroute-note">
+                            ↻ Rerouted via @NameOf(_activeRoute[1], byMac)@(_baselineRoute.Count > 1 ? $" (normally via {NameOf(_baselineRoute[1], byMac)})" : "").
+                        </p>
+                    }
+                    <ol class="route-path" aria-label="Route to gateway">
+                        @for (int i = 0; i < _activeRoute.Count; i++)
+                        {
+                            var mac = _activeRoute[i];
+                            <li class="route-hop" @key="mac" title="@mac">
+                                @if (i > 0)
+                                {
+                                    <span class="route-arrow" aria-hidden="true">-&gt;</span>
+                                }
+                                <span class="mono-data @(i == _activeRoute.Count - 1 ? "accent-text" : "")">@(byMac.TryGetValue(mac, out var hop) ? hop.ShortLabel : mac)</span>
+                            </li>
+                        }
+                    </ol>
+                    <div class="route-meta">
+                        <span class="mono-label">Path cost</span>
+                        <span class="mono-data">@RouteCost.ToString("0.00", CultureInfo.InvariantCulture)</span>
+                    </div>
+                }
+            </div>
+
+            <div class="panel">
+                <header class="panel-header">
+                    <h3>Simulate Node Failure</h3>
+                    @if (selected is not null)
+                    {
+                        <span class="mono-label @(selected.Node.IsOffline ? "fault-text" : "")">@(selected.Node.IsOffline ? "Offline" : "Online")</span>
+                    }
+                </header>
+
+                @if (selected is null)
+                {
+                    <div class="empty-state">Select a node to take it offline and watch the mesh reroute around it.</div>
+                }
+                else
+                {
+                    <div class="failure-control">
+                        <div>
+                            <span class="mono-label">Selected node</span>
+                            <div class="mono-data">@selected.Mac</div>
+                            <p class="hint-text">An offline node sends no readings, and sensors left without a route stop reporting too.</p>
+                        </div>
+                        <button class="ghost-button" disabled="@_isToggling" @onclick="ToggleOfflineAsync">
+                            @(_isToggling ? "Updating..." : selected.Node.IsOffline ? "Bring back online" : "Take offline")
+                        </button>
+                    </div>
+                    @if (_toggleError is not null)
+                    {
+                        <span class="mono-label accent-text" role="alert">@_toggleError</span>
+                    }
+                }
+            </div>
+
+            <div class="panel history-panel">
+                <header class="panel-header">
+                    <h3>Telemetry History</h3>
+                    <span class="mono-label">Last 2 hours</span>
+                </header>
+
+                @if (selected is null)
+                {
+                    <div class="empty-state">Select a sensor to load its historical readings from the AVL index.</div>
+                }
+                else if (!selected.IsSensor)
+                {
+                    <div class="empty-state">@(selected.IsGateway ? "The gateway" : "A router") relays telemetry but does not record readings of its own.</div>
+                }
+                else if (_isHistoryLoading)
+                {
+                    <div class="empty-state" role="status">Querying the AVL index...</div>
+                }
+                else if (_historyError is not null)
+                {
+                    <div class="empty-state">@_historyError</div>
+                }
+                else if (_history.Count == 0)
+                {
+                    <div class="empty-state">No readings in the last 2 hours for this sensor. New readings arrive every 4-12 seconds while it is online.</div>
+                }
+                else
+                {
+                    var historyCategory = selected.Node.Category ?? SensorCategory.Unknown;
+                    <div class="history-table" role="table" aria-label="Historical telemetry">
+                        <div class="history-row history-head" role="row">
+                            <span role="columnheader">Time (local)</span>
+                            <span role="columnheader">Value</span>
+                        </div>
+                        <div class="history-scroll">
+                            @foreach (var reading in _history.AsEnumerable().Reverse())
+                            {
+                                <div class="history-row" role="row">
+                                    <span role="cell" class="feed-row-time" title="@TimeDisplay.Full(reading.Timestamp)">@TimeDisplay.Clock(reading.Timestamp)</span>
+                                    <span role="cell" class="feed-row-value">
+                                        <StatusPill Status="SensorReadingInfo.GetStatus(reading.Value)" />
+                                        @SensorReadingInfo.Format(reading.Value, historyCategory)
+                                    </span>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                    <span class="mono-label">@_history.Count readings, newest first</span>
+                }
+            </div>
+        </div>
+    </div>
 </div>
+
+@code {
+    private const string GatewayMac = "00:00:00:00:00:00";
+    private const double CanvasWidth = 1000;
+    private const double CanvasHeight = 750;
+    private const double CanvasPadding = 60;
+    private const double GatewayRadius = 18;
+    private const double RouterRadius = 13;
+    private const double SensorRadius = 8;
+
+    private MeshTopology? _topology;
+    private MeshTopology? _pendingTopology;
+    private List<AlertDetail> _alerts = new();
+    private List<AlertDetail>? _pendingAlerts;
+    private Dictionary<string, (double X, double Y)> _projected = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _routeEdgeKeys = new(StringComparer.OrdinalIgnoreCase);
+    private List<string> _activeRoute = new();
+    private List<string> _baselineRoute = new();
+    private double _routeCostFromServer;
+    private List<TelemetryReading<double>> _history = new();
+    private string? _selectedMac;
+    private Guid? _selectedSensorId;
+    private string? _hoverMac;
+    private string? _routeError;
+    private string? _historyError;
+    private string? _toggleError;
+    private string? _actionError;
+    private bool _isRouteLoading;
+    private bool _isHistoryLoading;
+    private bool _isToggling;
+    private bool _isRefreshing;
+    private bool _isSeeding;
+    private bool _isRestoring;
+    private bool _isAcknowledging;
+    private bool _isValidating;
+    private bool _isDisconnected;
+    private DateTime? _lastSuccessUtc;
+    private int _selectionVersion;
+    private System.Threading.Timer? _pollTimer;
+
+    // View state the operator chose; none of it is reset by the 5-second refresh.
+    private string _search = string.Empty;
+    private bool _problemsOnly;
+    private bool _listView;
+    private bool _paused;
+    private readonly HashSet<string> _collapsedAreas = new(StringComparer.OrdinalIgnoreCase);
+    private ValidationResult? _validation;
+    private HashSet<string> _invalidMacs = new(StringComparer.OrdinalIgnoreCase);
+
+    private List<TopologyNodeView> Views => _topology is null
+        ? new()
+        : TopologyView.Build(_topology, _alerts, _search, _problemsOnly, _invalidMacs);
+
+    private double RouteCost => _routeCostFromServer > 0 ? _routeCostFromServer : _topology?.Edges.Where(IsRouteEdge).Sum(e => e.Weight) ?? 0;
+
+    private bool IsRerouted => _activeRoute.Count > 1 && _baselineRoute.Count > 0
+        && !_activeRoute.SequenceEqual(_baselineRoute, StringComparer.OrdinalIgnoreCase);
+
+    private IReadOnlyList<TelemetryReading<double>> SparklineReadings => _history.TakeLast(30).ToList();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync(applyWhilePaused: true);
+
+        // OnInitializedAsync also runs during server pre-render; polling only makes sense in the live WASM instance.
+        if (OperatingSystem.IsBrowser())
+        {
+            _pollTimer = new System.Threading.Timer(async _ => await PollTickAsync(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private async Task PollTickAsync()
+    {
+        await PollAsync();
+
+        // A tick already in flight when the component is disposed must not render into a torn-down component.
+        if (_pollTimer is not null)
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    // One refresh cycle; public so tests can drive it without a timer.
+    public async Task PollAsync()
+    {
+        if (_isRefreshing)
+        {
+            return;
+        }
+
+        _isRefreshing = true;
+
+        try
+        {
+            await LoadAsync(applyWhilePaused: false);
+
+            // Another client may have failed a relay on this route, so the trace is re-run against the new topology.
+            if (!_paused && _selectedMac is not null && !_isDisconnected)
+            {
+                var version = _selectionVersion;
+                await Task.WhenAll(LoadRouteAsync(_selectedMac, version), RefreshHistoryQuietlyAsync(version));
+            }
+        }
+        finally
+        {
+            _isRefreshing = false;
+        }
+    }
+
+    private async Task LoadAsync(bool applyWhilePaused)
+    {
+        try
+        {
+            var topologyTask = Http.GetFromJsonAsync<MeshTopology>("api/topology");
+            var alertsTask = Http.GetFromJsonAsync<List<AlertDetail>>("api/alerts/details");
+            await Task.WhenAll(topologyTask, alertsTask);
+
+            _isDisconnected = false;
+            _lastSuccessUtc = DateTime.UtcNow;
+
+            // Like the live feed, a paused map keeps polling (so connection problems still show) but holds the new data back.
+            if (_paused && !applyWhilePaused)
+            {
+                _pendingTopology = topologyTask.Result;
+                _pendingAlerts = alertsTask.Result;
+                return;
+            }
+
+            SetTopology(topologyTask.Result);
+            _alerts = alertsTask.Result ?? new();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            // A failed poll is retried on the next tick; the banner tells the operator once instead of every 5 seconds.
+            _isDisconnected = true;
+        }
+    }
+
+    private async Task TogglePause()
+    {
+        _paused = !_paused;
+
+        if (!_paused)
+        {
+            if (_pendingTopology is not null)
+            {
+                SetTopology(_pendingTopology);
+                _alerts = _pendingAlerts ?? _alerts;
+                _pendingTopology = null;
+                _pendingAlerts = null;
+            }
+
+            if (_selectedMac is not null)
+            {
+                await LoadRouteAsync(_selectedMac, _selectionVersion);
+            }
+        }
+    }
+
+    private async Task SelectNodeAsync(string macAddress)
+    {
+        // Re-selecting the same node is a no-op unless a load failed, in which case it is the retry.
+        if (IsSameMac(macAddress, _selectedMac) && _routeError is null && _historyError is null)
+        {
+            return;
+        }
+
+        var version = ++_selectionVersion;
+        _selectedMac = macAddress;
+        _selectedSensorId = _topology?.Nodes.FirstOrDefault(n => IsSameMac(n.MacAddress, macAddress))?.SensorId;
+        _activeRoute = new();
+        _baselineRoute = new();
+        _routeCostFromServer = 0;
+        _routeEdgeKeys.Clear();
+        _history = new();
+        _routeError = null;
+        _historyError = null;
+        _toggleError = null;
+        _isRouteLoading = true;
+        _isHistoryLoading = false;
+
+        await Task.WhenAll(LoadRouteAsync(macAddress, version), LoadHistoryAsync(version));
+    }
+
+    private async Task HandleNodeKeyAsync(KeyboardEventArgs e, string macAddress)
+    {
+        if (e.Key is "Enter" or " ")
+        {
+            await SelectNodeAsync(macAddress);
+        }
+    }
+
+    private void ClearHover(string macAddress)
+    {
+        if (IsSameMac(_hoverMac, macAddress))
+        {
+            _hoverMac = null;
+        }
+    }
+
+    private void ToggleArea(string area)
+    {
+        if (!_collapsedAreas.Remove(area))
+        {
+            _collapsedAreas.Add(area);
+        }
+    }
+
+    private async Task LoadRouteAsync(string macAddress, int version)
+    {
+        try
+        {
+            var response = await Http.GetFromJsonAsync<MeshRoute>($"api/topology/route/{Uri.EscapeDataString(macAddress)}");
+
+            // A slower response for a previously selected node must not overwrite the current selection's route.
+            if (version != _selectionVersion)
+            {
+                return;
+            }
+
+            SetRoute(response?.Path ?? new());
+            _baselineRoute = response?.BaselinePath ?? new();
+            _routeCostFromServer = response?.Cost ?? 0;
+            _routeError = null;
+        }
+        catch (HttpRequestException)
+        {
+            if (version == _selectionVersion)
+            {
+                _routeError = "Route trace failed. It is retried on the next sync.";
+            }
+        }
+        finally
+        {
+            if (version == _selectionVersion)
+            {
+                _isRouteLoading = false;
+            }
+        }
+    }
+
+    // The topology already carries each sensor's ID, so history is one request rather than downloading every sensor.
+    private async Task LoadHistoryAsync(int version)
+    {
+        if (_selectedSensorId is not Guid sensorId)
+        {
+            if (_selectedMac is not null && _topology?.Nodes.FirstOrDefault(n => IsSameMac(n.MacAddress, _selectedMac)) is { Role: MeshNodeRole.Sensor })
+            {
+                _historyError = "This node is not registered as a sensor, so it has no telemetry on record.";
+            }
+
+            return;
+        }
+
+        _isHistoryLoading = true;
+
+        try
+        {
+            var readings = await FetchHistoryAsync(sensorId);
+            if (version == _selectionVersion)
+            {
+                _history = readings;
+            }
+        }
+        catch (HttpRequestException)
+        {
+            if (version == _selectionVersion)
+            {
+                _historyError = "Telemetry history could not be loaded. Select the node again to retry.";
+            }
+        }
+        finally
+        {
+            if (version == _selectionVersion)
+            {
+                _isHistoryLoading = false;
+            }
+        }
+    }
+
+    // Runs on every poll, so it never shows the loading state and keeps the last good table if a request fails.
+    private async Task RefreshHistoryQuietlyAsync(int version)
+    {
+        if (_isHistoryLoading || _selectedSensorId is not Guid sensorId)
+        {
+            return;
+        }
+
+        try
+        {
+            var readings = await FetchHistoryAsync(sensorId);
+
+            if (version == _selectionVersion)
+            {
+                _history = readings;
+                _historyError = null;
+            }
+        }
+        catch (HttpRequestException)
+        {
+            return;
+        }
+    }
+
+    private async Task<List<TelemetryReading<double>>> FetchHistoryAsync(Guid sensorId)
+    {
+        var end = DateTime.UtcNow;
+        var start = end.AddHours(-2);
+        var url = $"api/telemetry/{sensorId}/range?start={Uri.EscapeDataString(start.ToString("O"))}&end={Uri.EscapeDataString(end.ToString("O"))}";
+        var readings = await Http.GetFromJsonAsync<List<TelemetryReading<double>>>(url) ?? new();
+        return readings.OrderBy(r => r.Timestamp).ToList();
+    }
+
+    private async Task ToggleOfflineAsync()
+    {
+        var node = _topology?.Nodes.FirstOrDefault(n => IsSameMac(n.MacAddress, _selectedMac));
+        if (node is null || _isToggling)
+        {
+            return;
+        }
+
+        _isToggling = true;
+        _toggleError = null;
+        var action = node.IsOffline ? "restore" : "fail";
+
+        try
+        {
+            var response = await Http.PostAsync($"api/topology/{action}/{Uri.EscapeDataString(node.MacAddress)}", null);
+            if (!response.IsSuccessStatusCode)
+            {
+                _toggleError = "The gateway rejected the change. Refresh and try again.";
+                return;
+            }
+
+            await LoadAsync(applyWhilePaused: true);
+            await LoadRouteAsync(node.MacAddress, _selectionVersion);
+        }
+        catch (HttpRequestException)
+        {
+            _toggleError = "Could not reach the gateway. The node state is unchanged.";
+        }
+        finally
+        {
+            _isToggling = false;
+        }
+    }
+
+    private async Task AcknowledgeAsync(Guid sensorId)
+    {
+        _isAcknowledging = true;
+        _actionError = null;
+
+        try
+        {
+            var response = await Http.PostAsync($"api/alerts/{sensorId}/resolve", null);
+            response.EnsureSuccessStatusCode();
+            await LoadAsync(applyWhilePaused: true);
+        }
+        catch (HttpRequestException)
+        {
+            _actionError = "Could not acknowledge - gateway unreachable.";
+        }
+        finally
+        {
+            _isAcknowledging = false;
+        }
+    }
+
+    private async Task LoadDemoSensorsAsync()
+    {
+        _isSeeding = true;
+        _actionError = null;
+
+        try
+        {
+            var response = await Http.PostAsync("api/sensors/seed/10", null);
+            response.EnsureSuccessStatusCode();
+            await LoadAsync(applyWhilePaused: true);
+        }
+        catch (HttpRequestException)
+        {
+            _actionError = "Could not load demo sensors - gateway unreachable.";
+        }
+        finally
+        {
+            _isSeeding = false;
+        }
+    }
+
+    private async Task RestoreAllAsync()
+    {
+        _isRestoring = true;
+        _actionError = null;
+
+        try
+        {
+            var response = await Http.PostAsync("api/topology/restore-all", null);
+            response.EnsureSuccessStatusCode();
+            await LoadAsync(applyWhilePaused: true);
+
+            if (_selectedMac is not null)
+            {
+                await LoadRouteAsync(_selectedMac, _selectionVersion);
+            }
+        }
+        catch (HttpRequestException)
+        {
+            _actionError = "Could not restore the network - gateway unreachable.";
+        }
+        finally
+        {
+            _isRestoring = false;
+        }
+    }
+
+    // Builds the Gateway > Router > Sensor tree from the map as currently shown and asks the gateway to validate it.
+    private async Task ValidateNetworkAsync()
+    {
+        if (_topology is null)
+        {
+            return;
+        }
+
+        _isValidating = true;
+        _actionError = null;
+
+        try
+        {
+            var tree = MeshDeploymentTree.Build(_topology);
+            var response = await Http.PostAsJsonAsync("api/deployment/validate/details", tree);
+            response.EnsureSuccessStatusCode();
+            var result = await response.Content.ReadFromJsonAsync<ValidationResult>();
+            if (result is not null)
+            {
+                _validation = result with { Issues = result.Issues ?? new() };
+                _invalidMacs = _validation.Issues.Select(i => i.NodeId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        catch (HttpRequestException)
+        {
+            _actionError = "Validation failed to run - gateway unreachable.";
+        }
+        finally
+        {
+            _isValidating = false;
+        }
+    }
+
+    private void ClearValidation()
+    {
+        _validation = null;
+        _invalidMacs = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void SetTopology(MeshTopology? topology)
+    {
+        if (topology is null || topology.Nodes.Count == 0)
+        {
+            return;
+        }
+
+        _topology = topology;
+
+        // The selection survives refreshes; it is only dropped if the node itself has gone (for example after "Clear all").
+        if (_selectedMac is not null && !topology.Nodes.Any(n => IsSameMac(n.MacAddress, _selectedMac)))
+        {
+            _selectedMac = null;
+            _selectedSensorId = null;
+            SetRoute(new());
+            _history = new();
+        }
+        else if (_selectedMac is not null)
+        {
+            _selectedSensorId = topology.Nodes.First(n => IsSameMac(n.MacAddress, _selectedMac)).SensorId;
+        }
+
+        var minX = topology.Nodes.Min(n => n.X);
+        var maxX = topology.Nodes.Max(n => n.X);
+        var minY = topology.Nodes.Min(n => n.Y);
+        var maxY = topology.Nodes.Max(n => n.Y);
+        var spanX = Math.Max(maxX - minX, 0.001);
+        var spanY = Math.Max(maxY - minY, 0.001);
+
+        // One scale for both axes keeps the mesh geometry true; the leftover axis is centred.
+        var scale = Math.Min((CanvasWidth - 2 * CanvasPadding) / spanX, (CanvasHeight - 2 * CanvasPadding) / spanY);
+        var offsetX = (CanvasWidth - spanX * scale) / 2;
+        var offsetY = (CanvasHeight - spanY * scale) / 2;
+
+        // SVG y grows downward, so the mesh y axis is flipped to keep north at the top.
+        _projected = topology.Nodes.ToDictionary(
+            n => n.MacAddress,
+            n => (Math.Round(offsetX + (n.X - minX) * scale, 1), Math.Round(offsetY + (maxY - n.Y) * scale, 1)),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void SetRoute(List<string> path)
+    {
+        _activeRoute = path;
+        _routeEdgeKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        for (int i = 0; i < path.Count - 1; i++)
+        {
+            _routeEdgeKeys.Add(EdgeKey(path[i], path[i + 1]));
+        }
+    }
+
+    private (double X, double Y) Project(string macAddress) =>
+        _projected.TryGetValue(macAddress, out var point) ? point : (CanvasWidth / 2, CanvasHeight / 2);
+
+    // Router labels sit on the gateway side of the router, away from the sensors fanning outwards. When the gateway is
+    // mostly to one side the label is anchored at its near end, so the text grows away from the router instead of over it.
+    private (double X, double Y, string Anchor) RouterLabelPosition(double x, double y, double radius)
+    {
+        var (gx, gy) = Project(GatewayMac);
+        var length = Math.Sqrt(Math.Pow(gx - x, 2) + Math.Pow(gy - y, 2));
+        if (length < 0.001)
+        {
+            return (x, y + radius + 14, "middle");
+        }
+
+        var (ux, uy) = ((gx - x) / length, (gy - y) / length);
+        if (Math.Abs(ux) >= 0.5)
+        {
+            return (x + ux * (radius + 6), y + uy * (radius + 6) + 4, ux > 0 ? "start" : "end");
+        }
+
+        return (x, y + Math.Sign(uy) * (radius + 14) + 4, "middle");
+    }
+
+    private bool IsRouteEdge(MeshEdge edge) => _routeEdgeKeys.Contains(EdgeKey(edge.SourceMac, edge.DestinationMac));
+
+    private bool IsOnRoute(string macAddress) => _activeRoute.Any(m => IsSameMac(m, macAddress));
+
+    private static string EdgeClass(MeshEdge edge, Dictionary<string, TopologyNodeView> byMac)
+    {
+        byMac.TryGetValue(edge.SourceMac, out var source);
+        byMac.TryGetValue(edge.DestinationMac, out var destination);
+        var classes = new List<string>();
+
+        if (source?.Node.IsOffline == true || destination?.Node.IsOffline == true)
+        {
+            classes.Add("down");
+        }
+
+        // A sensor's link to a router other than its own is the standby path the mesh uses when that router fails.
+        if (IsBackupLink(source, destination) || IsBackupLink(destination, source))
+        {
+            classes.Add("backup");
+        }
+
+        if (source?.IsDimmed == true || destination?.IsDimmed == true)
+        {
+            classes.Add("dimmed");
+        }
+
+        return string.Join(" ", classes);
+    }
+
+    private static bool IsBackupLink(TopologyNodeView? sensor, TopologyNodeView? router) =>
+        sensor is { IsSensor: true } && router is { IsRouter: true } && !IsSameMac(sensor.Node.ParentMac, router.Mac);
+
+    private static string NameOf(string mac, Dictionary<string, TopologyNodeView> byMac) =>
+        byMac.TryGetValue(mac, out var view) ? view.Name : mac;
+
+    private static string EdgeKey(string a, string b) =>
+        string.Compare(a, b, StringComparison.OrdinalIgnoreCase) < 0 ? $"{a}|{b}" : $"{b}|{a}";
+
+    private static string RoleClass(TopologyNodeView view) => view.IsGateway ? "gateway" : view.IsRouter ? "router" : "sensor";
+
+    private static string Svg(double value) => value.ToString("0.#", CultureInfo.InvariantCulture);
+
+    private static bool IsSameMac(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+
+    public void Dispose()
+    {
+        _pollTimer?.Dispose();
+        _pollTimer = null;
+    }
+}

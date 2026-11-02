@@ -1,0 +1,20 @@
+@using SmartX.Gateway.Shared.Services
+
+@if (Status is ReadingStatus status)
+{
+    @if (status != ReadingStatus.Normal || ShowNormal)
+    {
+        <span class="status-pill @status.ToString().ToLowerInvariant()" title="@SensorReadingInfo.Explain(status)">@status</span>
+    }
+}
+else if (ShowNormal)
+{
+    <span class="status-pill nodata" title="This sensor has not sent a reading yet.">No data</span>
+}
+
+@code {
+    [Parameter] public ReadingStatus? Status { get; set; }
+
+    // Feeds only flag problems; tables and detail views also label healthy readings.
+    [Parameter] public bool ShowNormal { get; set; }
+}

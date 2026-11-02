@@ -1,0 +1,61 @@
+@using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
+
+@{
+    var statuses = Sensors
+        .Select(s => s.HistoricalTelemetry.MaxBy(r => r.Timestamp) is { } latest ? SensorReadingInfo.GetStatus(latest.Value) : (ReadingStatus?)null)
+        .ToList();
+    var normal = statuses.Count(s => s == ReadingStatus.Normal);
+    var warning = statuses.Count(s => s == ReadingStatus.Warning);
+    var critical = statuses.Count(s => s == ReadingStatus.Critical);
+    var waiting = statuses.Count(s => s is null);
+    var connection = ConnectionIssues.Count;
+    var tone = critical > 0 || connection > 0 ? "critical" : warning > 0 ? "warning" : "ok";
+    var headline = Sensors.Count == 0
+        ? "No sensors yet"
+        : critical > 0 ? "Action needed"
+        : connection > 0 ? "Connection problems"
+        : warning > 0 ? "Keep an eye on it"
+        : waiting == Sensors.Count ? "Waiting for first readings"
+        : waiting > 0 ? "All latest readings normal"
+        : "Everything is OK";
+}
+
+<div class="health-bar @tone" role="status">
+    <span class="health-bar-headline">@headline</span>
+    <span class="health-count">@Sensors.Count @(Sensors.Count == 1 ? "sensor" : "sensors")</span>
+    <span class="health-count"><StatusPill Status="ReadingStatus.Normal" ShowNormal="true" /> @normal normal</span>
+    <span class="health-count"><StatusPill Status="ReadingStatus.Warning" /> @warning warning</span>
+    <span class="health-count"><StatusPill Status="ReadingStatus.Critical" /> @critical critical</span>
+    @if (waiting > 0)
+    {
+        <span class="health-count"><StatusPill ShowNormal="true" /> @waiting waiting for data</span>
+    }
+    @if (connection > 0)
+    {
+        <a class="health-count inline-link" href="topology">
+            <span class="status-pill offline">Offline</span> @connection connection @(connection == 1 ? "problem" : "problems")
+        </a>
+    }
+    @if (Sensors.Count == 0)
+    {
+        <a class="inline-link" href="dashboard">Add sensors</a>
+    }
+    <span class="hint-text">Based on each sensor's latest reading.</span>
+    @if (connection > 0)
+    {
+        <ul class="health-issues">
+            @foreach (var issue in ConnectionIssues)
+            {
+                <li>@issue</li>
+            }
+        </ul>
+    }
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<SensorProfile> Sensors { get; set; } = Array.Empty<SensorProfile>();
+
+    // Plain-text descriptions from /api/summary, e.g. "Boiler Room - Line 2 is offline (simulated)".
+    [Parameter] public IReadOnlyList<string> ConnectionIssues { get; set; } = Array.Empty<string>();
+}

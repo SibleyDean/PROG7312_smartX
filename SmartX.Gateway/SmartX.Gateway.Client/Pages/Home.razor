@@ -1,36 +1,172 @@
 @page "/"
+@implements IDisposable
+@using SmartX.Gateway.Shared.Models
+@inject HttpClient Http
 
-<PageTitle>Smart-X | Ingestion Gateway</PageTitle>
+<PageTitle>Smart-X | Gateway</PageTitle>
 
 <section class="section">
-    <span class="mono-label accent-text">Telemetry ingestion and control</span>
-    <h1>Smart-X Ingestion Gateway</h1>
+    <span class="mono-label accent-text">Factory sensor monitoring</span>
+    <h1>Smart-X Gateway</h1>
     <p>
-        A typed telemetry pipeline for field sensors, built on .NET 8 and Blazor WebAssembly.
-        Validate deployment trees, stream readings and issue manual overrides from one console.
+        Monitor factory sensors, spot problems early, and send commands to fix them.
+        Every reading is checked against safe limits, and anything out of range is raised as an alert for you to act on.
     </p>
     <div class="filter-chips">
-        <a href="command-stream" class="accent-button">Enter Command Stream</a>
-        <a href="dashboard" class="ghost-button">Open Ingestion</a>
+        <a href="command-stream" class="accent-button">Open Command Stream</a>
+        <a href="dashboard" class="ghost-button">View Sensors</a>
+        @if (_summary is { DemoSensorCount: 0 })
+        {
+            <button class="ghost-button" disabled="@_isSeeding" @onclick="LoadDemoSensorsAsync">
+                @(_isSeeding ? "Loading demo sensors..." : "Load demo sensors")
+            </button>
+        }
     </div>
 
-    <div class="insights-list" style="max-width: 65ch; margin-top: 3rem;">
+    <div role="status">
+        @if (_error is not null)
+        {
+            <p class="accent-text">@_error</p>
+        }
+        else if (_seedMessage is not null)
+        {
+            <p>@_seedMessage</p>
+        }
+    </div>
+
+    <div class="summary-stats" aria-label="Live summary">
         <div class="insight-card">
-            <h3>Real-time ingestion</h3>
-            <p>Generic readings carry floats, integers and booleans without boxing, and aggregate in place.</p>
+            <span class="mono-label">Sensors</span>
+            <h2>@(_summary?.SensorCount.ToString() ?? "--")</h2>
         </div>
         <div class="insight-card">
-            <h3>Recursive deployment validation</h3>
-            <p>Nested device trees are checked from the facility down to every sensor node.</p>
+            <span class="mono-label">Open alerts</span>
+            <h2 class="@(_summary is { OpenAlerts: > 0 } ? "critical-text" : "")">@(_summary?.OpenAlerts.ToString() ?? "--")</h2>
+            @if (_summary is { OpenAlerts: > 0 })
+            {
+                <a class="inline-link" href="command-stream">Review alerts</a>
+            }
         </div>
         <div class="insight-card">
-            <h3>Predictive overrides</h3>
-            <p>Repeated searches, commands and critical readings surface as suggested actions.</p>
+            <span class="mono-label">Readings in the last minute</span>
+            <h2>@(_summary?.ReadingsLastMinute.ToString() ?? "--")</h2>
+            @if (_summary is { IsGenerationPaused: true })
+            {
+                <span class="mono-label warning-text">Live data paused</span>
+            }
         </div>
     </div>
+
+    <h2>Getting started</h2>
+    <ol class="getting-started">
+        @for (int i = 0; i < Steps.Count; i++)
+        {
+            var step = Steps[i];
+            <li class="insight-card">
+                <span class="step-marker @(step.Done ? "done" : "")" aria-hidden="true">@(step.Done ? "✓" : (i + 1).ToString())</span>
+                <div>
+                    <h3>@step.Title <span class="mono-label @(step.Done ? "ok-text" : "")">@(step.Done ? "Done" : "To do")</span></h3>
+                    <p>@step.Description</p>
+                </div>
+                <a class="ghost-button" href="@step.Href">@step.LinkText</a>
+            </li>
+        }
+    </ol>
 
     <footer class="panel-header" style="margin-top: 3rem;">
         <span class="mono-label">&copy; 2026 Smart-X Systems</span>
         <span class="mono-label">.NET 8 &middot; Blazor WebAssembly</span>
     </footer>
 </section>
+
+@code {
+    private GatewaySummary? _summary;
+    private System.Threading.Timer? _pollTimer;
+    private bool _isSeeding;
+    private string? _error;
+    private string? _seedMessage;
+
+    private record Step(string Title, string Description, string Href, string LinkText, bool Done);
+
+    private List<Step> Steps
+    {
+        get
+        {
+            // Mesh sensors always exist, so the step is only done once demo or manually registered sensors are added.
+            var hasSensors = _summary is { DemoSensorCount: > 0 };
+            var hasReadings = _summary is { TotalReadings: > 0 };
+            var alertsInHand = hasReadings && (_summary!.OpenAlerts == 0 || _summary.AlertsAcknowledged > 0);
+
+            return
+            [
+                new("Add sensors", "Load demo sensors on the Sensors page to try things out, or register real devices through the gateway API.", "dashboard", "Go to Sensors", hasSensors),
+                new("Watch live readings", "Readings stream into the Command Stream as sensors report in.", "command-stream", "Open live feed", hasReadings),
+                new("Respond to alerts", "When a reading leaves the safe range, send a command or acknowledge the alert.", "command-stream", "See alerts", alertsInHand)
+            ];
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadSummaryAsync();
+
+        // OnInitializedAsync also runs during server pre-render; polling only makes sense in the live WASM instance.
+        if (!OperatingSystem.IsBrowser())
+        {
+            return;
+        }
+
+        _pollTimer =new System.Threading.Timer(async _ => await PollAsync(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    private async Task PollAsync()
+    {
+        await LoadSummaryAsync();
+
+        if (_pollTimer is not null)
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task LoadSummaryAsync()
+    {
+        try
+        {
+            _summary = await Http.GetFromJsonAsync<GatewaySummary>("api/summary");
+            _error = null;
+        }
+        catch (HttpRequestException)
+        {
+            _error = "Gateway unreachable - the summary will update when it is back.";
+        }
+    }
+
+    private async Task LoadDemoSensorsAsync()
+    {
+        _isSeeding = true;
+        _seedMessage = null;
+
+        try
+        {
+            var response = await Http.PostAsync("api/sensors/seed/10", null);
+            response.EnsureSuccessStatusCode();
+            _seedMessage = "10 demo sensors loaded. Open the Command Stream to watch their readings, or the Topology map to see where they connect.";
+            await LoadSummaryAsync();
+        }
+        catch (HttpRequestException)
+        {
+            _error = "Could not load demo sensors - gateway unreachable.";
+        }
+        finally
+        {
+            _isSeeding = false;
+        }
+    }
+
+    public void Dispose()
+    {
+        _pollTimer?.Dispose();
+        _pollTimer = null;
+    }
+}

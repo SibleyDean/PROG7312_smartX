@@ -1,0 +1,38 @@
+@* Every colour, icon and line style used on the map, each with a word, so nothing depends on colour alone. *@
+<details class="legend topology-key" open>
+    <summary>Map key</summary>
+    <div class="legend-body">
+        <div>
+            <span class="mono-label">Nodes</span>
+            <ul class="key-list">
+                <li><span class="key-node gateway" aria-hidden="true"></span>Gateway - every route ends here</li>
+                <li><span class="key-node router" aria-hidden="true"></span>Router - one per factory area, labelled with the area</li>
+                <li><span class="key-node sensor" aria-hidden="true"></span>Sensor - labelled with its line (L2 = Line 2)</li>
+                <li><span class="key-alert" aria-hidden="true">▲</span>Open alert on this sensor</li>
+                <li><span class="key-rollup" aria-hidden="true">2 issues</span>Problems among the nodes a router or the gateway serves</li>
+            </ul>
+        </div>
+        <div>
+            <span class="mono-label">Status</span>
+            <ul class="key-list">
+                <li><span class="key-node sensor state-normal" aria-hidden="true">✓</span>Normal reading</li>
+                <li><span class="key-node sensor state-warning" aria-hidden="true">!</span>Warning reading</li>
+                <li><span class="key-node sensor state-critical" aria-hidden="true">‼</span>Critical reading</li>
+                <li><span class="key-node sensor state-nodata" aria-hidden="true">…</span>No data yet</li>
+                <li><span class="key-node sensor state-offline" aria-hidden="true">✕</span>Offline (simulated failure) - sends nothing</li>
+                <li><span class="key-node sensor state-noroute" aria-hidden="true">?</span>No route - online but cut off from the gateway</li>
+            </ul>
+        </div>
+        <div>
+            <span class="mono-label">Links</span>
+            <ul class="key-list">
+                <li><span class="key-line" aria-hidden="true"></span>Normal link</li>
+                <li><span class="key-line backup" aria-hidden="true"></span>Backup link to a neighbouring router</li>
+                <li><span class="key-line down" aria-hidden="true"></span>Link to an offline node (dashed)</li>
+                <li><span class="key-line route" aria-hidden="true"></span>Selected node's route to the gateway</li>
+                <li><span class="key-node sensor invalid" aria-hidden="true"></span>Red dashed outline - failed "Validate network"</li>
+                <li><span class="key-node sensor match" aria-hidden="true"></span>Ringed - matches your search (others are dimmed)</li>
+            </ul>
+        </div>
+    </div>
+</details>

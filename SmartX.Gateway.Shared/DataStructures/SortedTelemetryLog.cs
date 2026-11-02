@@ -6,7 +6,14 @@ public class SortedTelemetryLog
 {
     private readonly SortedDictionary<DateTime, List<TelemetryReading<double>>> _log = new();
     private readonly object _lock = new();
+    private readonly int _maxReadings;
     private int _readingCount;
+
+    public SortedTelemetryLog(int maxReadings = int.MaxValue)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxReadings);
+        _maxReadings = maxReadings;
+    }
 
     public int Count
     {
@@ -49,6 +56,37 @@ public class SortedTelemetryLog
             }
 
             _readingCount++;
+            TrimOldest();
+        }
+    }
+
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _log.Clear();
+            _readingCount = 0;
+        }
+    }
+
+    // Called under the lock; drops whole buckets from the oldest second until the log fits, splitting the last one if needed.
+    private void TrimOldest()
+    {
+        while (_readingCount > _maxReadings)
+        {
+            var (oldestKey, oldestBucket) = _log.First();
+            var excess = _readingCount - _maxReadings;
+
+            if (oldestBucket.Count <= excess)
+            {
+                _log.Remove(oldestKey);
+                _readingCount -= oldestBucket.Count;
+            }
+            else
+            {
+                oldestBucket.RemoveRange(0, excess);
+                _readingCount -= excess;
+            }
         }
     }
 

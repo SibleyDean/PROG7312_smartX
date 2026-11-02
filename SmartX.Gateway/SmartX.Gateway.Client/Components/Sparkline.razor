@@ -1,0 +1,49 @@
+@using System.Globalization
+@using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
+
+@if (Readings.Count >= 2)
+{
+    <svg class="sparkline" viewBox="0 0 @Width @Height" preserveAspectRatio="none" role="img" aria-label="@Summary">
+        <title>@Summary</title>
+        @* Shaded bands mark where readings become a warning or critical; the plot always spans 0-100. *@
+        <rect class="sparkline-band-critical" x="0" y="@Svg(Y(100))" width="@Width" height="@Band(100, SensorReadingInfo.CriticalHigh)" />
+        <rect class="sparkline-band-warning" x="0" y="@Svg(Y(SensorReadingInfo.CriticalHigh))" width="@Width" height="@Band(SensorReadingInfo.CriticalHigh, SensorReadingInfo.WarningHigh)" />
+        <rect class="sparkline-band-warning" x="0" y="@Svg(Y(SensorReadingInfo.WarningLow))" width="@Width" height="@Band(SensorReadingInfo.WarningLow, SensorReadingInfo.CriticalLow)" />
+        <rect class="sparkline-band-critical" x="0" y="@Svg(Y(SensorReadingInfo.CriticalLow))" width="@Width" height="@Band(SensorReadingInfo.CriticalLow, 0)" />
+        <polyline class="sparkline-line" points="@Points" />
+    </svg>
+}
+else
+{
+    <p class="hint-text">The trend chart appears once this sensor has two or more readings.</p>
+}
+
+@code {
+    private const double Width = 200;
+    private const double Height = 60;
+
+    // Oldest first.
+    [Parameter] public IReadOnlyList<TelemetryReading<double>> Readings { get; set; } = Array.Empty<TelemetryReading<double>>();
+    [Parameter] public SensorCategory Category { get; set; }
+
+    private string Points => string.Join(" ", Readings.Select((r, i) =>
+        $"{Svg(i * Width / (Readings.Count - 1))},{Svg(Y(Math.Clamp(r.Value, 0, 100)))}"));
+
+    private string Summary
+    {
+        get
+        {
+            var first = Readings[0].Value;
+            var last = Readings[^1].Value;
+            return $"Trend of the last {Readings.Count} readings: from {SensorReadingInfo.Format(first, Category)} to {SensorReadingInfo.Format(last, Category)}, " +
+                   $"lowest {SensorReadingInfo.Format(Readings.Min(r => r.Value), Category)}, highest {SensorReadingInfo.Format(Readings.Max(r => r.Value), Category)}.";
+        }
+    }
+
+    private static double Y(double value) => (100 - value) / 100 * Height;
+
+    private static string Band(double upper, double lower) => Svg(Y(lower) - Y(upper));
+
+    private static string Svg(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
+}
