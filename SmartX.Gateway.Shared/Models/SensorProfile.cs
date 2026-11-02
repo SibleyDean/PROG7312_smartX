@@ -16,6 +16,8 @@ public class SensorProfile
     [Required(ErrorMessage = "Sensor category is required.")]
     public SensorCategory Category { get; set; }
 
+    public SensorSource Source { get; set; } = SensorSource.Manual;
+
     public List<MediaAttachment> Attachments { get; set; } = new();
     public List<TelemetryReading<double>> HistoricalTelemetry { get; set; } = new();
 }
@@ -26,6 +28,14 @@ public enum SensorCategory
     PowerConsumption,
     Actuator,
     Unknown
+}
+
+// Seeded sensors are demo data, Manual ones were registered through the API, Mesh ones belong to the fixed mesh network.
+public enum SensorSource
+{
+    Seeded,
+    Manual,
+    Mesh
 }
 
 public class MediaAttachment

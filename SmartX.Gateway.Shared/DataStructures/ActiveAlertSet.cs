@@ -34,6 +34,16 @@ public class ActiveAlertSet
         }
     }
 
+    public int Clear()
+    {
+        lock (_lock)
+        {
+            var cleared = _activeAlerts.Count;
+            _activeAlerts.Clear();
+            return cleared;
+        }
+    }
+
     public bool Contains(Guid sensorId)
     {
         lock (_lock)

@@ -118,7 +118,7 @@ public class PredictiveActionEngine
                 insights[(group.Key, InvestigateAction)] = new ActionInsight(
                     group.First().DeviceMac,
                     InvestigateAction,
-                    $"{count} critical readings on this device in the last 5 minutes.",
+                    $"{count} warning or critical readings in the last 5 minutes.",
                     0.8);
             }
 
@@ -147,7 +147,7 @@ public class PredictiveActionEngine
                 insights[insightKey] = new ActionInsight(
                     deviceMac,
                     suggestedAction,
-                    $"{count} separate searches for '{query}' followed critical readings on this device in the last 24 hours.",
+                    $"You searched for \"{query}\" {count} times shortly after this device reported bad readings (last 24 hours).",
                     confidence);
             }
 

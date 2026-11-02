@@ -1,11 +1,10 @@
-using SmartX.Gateway.Shared.Models;
-
 namespace SmartX.Gateway.Services
 {
     public class TelemetryBackgroundProcessor : BackgroundService
     {
         private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(100);
-        private static readonly TimeSpan GenerationInterval = TimeSpan.FromSeconds(3);
+        private const int MinGenerationDelaySeconds = 4;
+        private const int MaxGenerationDelaySeconds = 12;
 
         private readonly TelemetryIngestionService _ingestionService;
         private readonly ILogger<TelemetryBackgroundProcessor> _logger;
@@ -18,14 +17,15 @@ namespace SmartX.Gateway.Services
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            var lastGeneratedAt = DateTime.UtcNow;
+            var nextGenerationAt = DateTime.UtcNow + NextGenerationDelay(Random.Shared);
 
             while (!stoppingToken.IsCancellationRequested)
             {
-                if (DateTime.UtcNow - lastGeneratedAt >= GenerationInterval)
+                // Real sensors report irregularly, so each reading waits a fresh random delay rather than a fixed tick.
+                if (DateTime.UtcNow >= nextGenerationAt)
                 {
-                    GenerateSyntheticReading();
-                    lastGeneratedAt = DateTime.UtcNow;
+                    _ingestionService.GenerateNextReading(Random.Shared);
+                    nextGenerationAt = DateTime.UtcNow + NextGenerationDelay(Random.Shared);
                 }
 
                 // Critical alerts are always drained before standard telemetry.
@@ -51,30 +51,10 @@ namespace SmartX.Gateway.Services
             }
         }
 
-        private void GenerateSyntheticReading()
-        {
-            var sensors = _ingestionService.GetSensors();
-            if (sensors.Count == 0)
-            {
-                return;
-            }
+        internal const int MinDelaySeconds = MinGenerationDelaySeconds;
+        internal const int MaxDelaySeconds = MaxGenerationDelaySeconds;
 
-            var sensor = sensors[Random.Shared.Next(sensors.Count)];
-            var reading = new TelemetryReading<double>
-            {
-                SensorId = sensor.Id,
-                Value = Random.Shared.NextDouble() * 100,
-                Timestamp = DateTime.UtcNow
-            };
-
-            try
-            {
-                _ingestionService.AddTelemetryBatch(sensor.Id, [reading]);
-            }
-            catch (KeyNotFoundException)
-            {
-                // The sensor was removed between picking it and ingesting; the next tick picks another.
-            }
-        }
+        internal static TimeSpan NextGenerationDelay(Random random) =>
+            TimeSpan.FromSeconds(MinGenerationDelaySeconds + random.NextDouble() * (MaxGenerationDelaySeconds - MinGenerationDelaySeconds));
     }
 }
