@@ -1,5 +1,7 @@
 @implements IDisposable
+@using SmartX.Gateway.Shared.Models
 @inject NavigationManager Navigation
+@inject HttpClient Http
 
 <header class="nav-container">
     <div class="nav-bar">
@@ -9,12 +11,17 @@
         <nav class="nav-links" aria-label="Primary">
             @foreach (var (href, label) in links)
             {
+                var (count, noun) = BadgeFor(href);
                 <NavLink href="@href">
                     @if (IsActive(href))
                     {
                         <span class="nav-active-dot" aria-hidden="true"></span>
                     }
                     @label
+                    @if (count > 0)
+                    {
+                        <span class="nav-count-badge" title="@count @noun">@count<span class="visually-hidden"> @noun</span></span>
+                    }
                 </NavLink>
             }
         </nav>
@@ -22,16 +29,61 @@
 </header>
 
 @code {
+    private const string AlertsHref = "command-stream";
+    private const string TopologyHref = "topology";
+
     private static readonly (string Href, string Label)[] links =
     [
-        ("dashboard", "Ingestion"),
-        ("command-stream", "Command Stream"),
-        ("topology", "Topology")
+        ("dashboard", "Sensors"),
+        (AlertsHref, "Command Stream"),
+        (TopologyHref, "Topology")
     ];
+
+    private int _openAlerts;
+    private int _connectionProblems;
+    private System.Threading.Timer? _summaryTimer;
+
+    private (int Count, string Noun) BadgeFor(string href) => href switch
+    {
+        AlertsHref => (_openAlerts, _openAlerts == 1 ? "open alert" : "open alerts"),
+        TopologyHref => (_connectionProblems, _connectionProblems == 1 ? "connection problem" : "connection problems"),
+        _ => (0, string.Empty)
+    };
 
     protected override void OnInitialized()
     {
         Navigation.LocationChanged += OnLocationChanged;
+
+        // The badges are a cheap background count; they only run in the live WASM instance, never during pre-render.
+        if (OperatingSystem.IsBrowser())
+        {
+            _summaryTimer = new System.Threading.Timer(async _ => await PollSummaryAsync(), null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private async Task PollSummaryAsync()
+    {
+        try
+        {
+            var summary = await Http.GetFromJsonAsync<GatewaySummary>("api/summary");
+            if (summary is null || (summary.OpenAlerts == _openAlerts && summary.ConnectionProblems == _connectionProblems))
+            {
+                return;
+            }
+
+            _openAlerts = summary.OpenAlerts;
+            _connectionProblems = summary.ConnectionProblems;
+        }
+        catch (HttpRequestException)
+        {
+            // The pages report connection problems; the badges keep their last known counts.
+            return;
+        }
+
+        if (_summaryTimer is not null)
+        {
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     // NavLink does not expose its active state to child content, so mirror its prefix match here.
@@ -47,5 +99,7 @@
     public void Dispose()
     {
         Navigation.LocationChanged -= OnLocationChanged;
+        _summaryTimer?.Dispose();
+        _summaryTimer = null;
     }
 }

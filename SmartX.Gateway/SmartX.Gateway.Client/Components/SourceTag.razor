@@ -1,0 +1,24 @@
+@using SmartX.Gateway.Shared.Models
+
+@if (Source is SensorSource source)
+{
+    <span class="source-tag @source.ToString().ToLowerInvariant()" title="@Explain(source)">@Label(source)</span>
+}
+
+@code {
+    [Parameter] public SensorSource? Source { get; set; }
+
+    public static string Label(SensorSource source) => source switch
+    {
+        SensorSource.Mesh => "Mesh",
+        SensorSource.Seeded => "Demo",
+        _ => "Manual"
+    };
+
+    private static string Explain(SensorSource source) => source switch
+    {
+        SensorSource.Mesh => "Part of the fixed mesh network; kept (but reset) when sensors are cleared.",
+        SensorSource.Seeded => "Demo sensor; removed when sensors are cleared.",
+        _ => "Registered through the API; removed when sensors are cleared."
+    };
+}

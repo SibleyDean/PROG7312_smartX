@@ -1,31 +1,129 @@
+@using SmartX.Gateway.Shared.DataStructures
+@using SmartX.Gateway.Shared.Models
 @using SmartX.Gateway.Shared.Services
+@inject HttpClient Http
 
 <div class="insights-panel" aria-labelledby="insights-title">
     <header class="panel-header">
         <h3 id="insights-title">Automated Insights</h3>
-        <span class="mono-label">@Insights.Count suggested</span>
+        <span class="mono-label">@Visible.Count suggested</span>
     </header>
 
     <div class="insights-list">
-        @if (Insights.Count == 0)
+        @if (Visible.Count == 0)
         {
-            <div class="empty-state">No patterns detected yet. Suggestions appear once searches, commands and critical readings start to repeat.</div>
+            <div class="empty-state">
+                <span>
+                    No suggestions right now. They appear when a device keeps reporting bad readings, or when you
+                    repeatedly <a class="inline-link" href="command-stream#device-search">search for a device</a> right after it alerts.
+                </span>
+            </div>
         }
 
-        @foreach (var insight in Insights)
+        @foreach (var insight in Visible)
         {
-            <div class="insight-card" @key="insight">
+            var sensor = FindSensor(insight.SensorMac);
+            var isCommand = sensor is not null && CommandCatalog.IsCommand(insight.SuggestedAction)
+                && CommandCatalog.FitsCategory(insight.SuggestedAction, sensor.Category);
+            var actionLabel = CommandCatalog.IsCommand(insight.SuggestedAction) ? CommandCatalog.Label(insight.SuggestedAction) : insight.SuggestedAction;
+            var (confidenceLabel, confidenceClass) = ConfidenceLabel(insight.Confidence);
+            <div class="insight-card" @key="Key(insight)">
                 <div class="panel-header">
-                    <span class="mono-data">@insight.SensorMac</span>
-                    <span class="mono-label accent-text">@insight.SuggestedAction</span>
+                    <div class="alert-main">
+                        <span class="mono-data">@insight.SensorMac</span>
+                        <span class="feed-row-sub">@(sensor is null ? "Device no longer registered" : $"{sensor.Location} - {SensorReadingInfo.Describe(sensor.Category)}")</span>
+                    </div>
+                    <span class="mono-label accent-text">@actionLabel</span>
                 </div>
                 <p>@insight.Reason</p>
-                <span class="mono-label">Confidence <span class="accent-text">@($"{insight.Confidence * 100:F0}%")</span></span>
+                <span class="mono-label">Confidence <span class="@confidenceClass">@confidenceLabel (@($"{insight.Confidence * 100:F0}%"))</span></span>
+                <div class="insight-actions">
+                    @if (sensor is not null)
+                    {
+                        <button class="accent-button" disabled="@_isBusy"
+                                title="@(isCommand ? $"Send {actionLabel} to {sensor.MacAddress} now" : $"Select {sensor.MacAddress} in Manual Override")"
+                                @onclick="() => ApplyAsync(insight, sensor, isCommand)">
+                            @(isCommand ? $"Apply: {actionLabel}" : "Apply: select device")
+                        </button>
+                    }
+                    <button class="ghost-button" title="Hide this suggestion until you reload the page" @onclick="() => Dismiss(insight)">Dismiss</button>
+                </div>
             </div>
+        }
+    </div>
+
+    <div role="status">
+        @if (_message is not null)
+        {
+            <p class="hint-text">@_message</p>
         }
     </div>
 </div>
 
 @code {
+    // Dismissals last for this browser tab; the engine keeps suggesting, the console just stops showing them.
+    private static readonly HashSet<string> Dismissed = new(StringComparer.OrdinalIgnoreCase);
+
     [Parameter] public IReadOnlyList<ActionInsight> Insights { get; set; } = Array.Empty<ActionInsight>();
+    [Parameter] public IReadOnlyList<SensorProfile> Sensors { get; set; } = Array.Empty<SensorProfile>();
+    [Parameter] public EventCallback OnCommandIssued { get; set; }
+    [Parameter] public EventCallback<Guid> OnSelectDevice { get; set; }
+
+    private bool _isBusy;
+    private string? _message;
+
+    private List<ActionInsight> Visible => Insights.Where(i => !Dismissed.Contains(Key(i))).ToList();
+
+    private static string Key(ActionInsight insight) => $"{insight.SensorMac.Replace('-', ':')}|{insight.SuggestedAction}";
+
+    private SensorProfile? FindSensor(string mac) =>
+        Sensors.FirstOrDefault(s => string.Equals(s.MacAddress.Replace('-', ':'), mac.Replace('-', ':'), StringComparison.OrdinalIgnoreCase));
+
+    private static (string Label, string CssClass) ConfidenceLabel(double confidence) => confidence switch
+    {
+        >= 0.8 => ("High", "accent-text"),
+        >= 0.65 => ("Medium", "warning-text"),
+        _ => ("Low", "")
+    };
+
+    private void Dismiss(ActionInsight insight)
+    {
+        Dismissed.Add(Key(insight));
+        _message = "Suggestion hidden for this session.";
+    }
+
+    private async Task ApplyAsync(ActionInsight insight, SensorProfile sensor, bool isCommand)
+    {
+        if (!isCommand)
+        {
+            _message = null;
+            await OnSelectDevice.InvokeAsync(sensor.Id);
+            return;
+        }
+
+        _isBusy = true;
+        _message = null;
+        var command = new ManualCommand(Guid.Empty, sensor.MacAddress, insight.SuggestedAction, null, DateTime.UtcNow);
+
+        try
+        {
+            var response = await Http.PostAsJsonAsync("api/commands/issue", command);
+            _message = response.IsSuccessStatusCode
+                ? $"{CommandCatalog.Label(insight.SuggestedAction)} sent to {sensor.Location} ({sensor.MacAddress})."
+                : "The gateway rejected the command.";
+
+            if (response.IsSuccessStatusCode)
+            {
+                await OnCommandIssued.InvokeAsync();
+            }
+        }
+        catch (HttpRequestException)
+        {
+            _message = "Command could not be sent - gateway unreachable.";
+        }
+        finally
+        {
+            _isBusy = false;
+        }
+    }
 }

@@ -1,8 +1,9 @@
 @using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
 
 @{
     var recentReadings = Sensors
-        .SelectMany(s => s.HistoricalTelemetry.Select(r => (SensorId: s.Id, Mac: s.MacAddress, Reading: r)))
+        .SelectMany(s => s.HistoricalTelemetry.Select(r => (Sensor: s, Reading: r)))
         .OrderByDescending(x => x.Reading.Timestamp)
         .Take(20)
         .ToList();
@@ -11,13 +12,28 @@
 <div class="feed-panel" aria-labelledby="feed-title" aria-busy="@(IsLoading ? "true" : "false")">
     <header class="panel-header">
         <h3 id="feed-title">Incoming Telemetry</h3>
-        <span class="mono-label">@(IsLoading ? "Connecting" : $"Latest {recentReadings.Count}")</span>
+        <div class="filter-chips" style="margin-bottom: 0; align-items: center;">
+            @if (IsPaused)
+            {
+                <span class="mono-label warning-text" role="status">Paused - @PendingCount new @(PendingCount == 1 ? "reading" : "readings")</span>
+            }
+            else
+            {
+                <span class="mono-label">@(IsLoading ? "Connecting" : $"Latest {recentReadings.Count}")</span>
+            }
+            @if (!IsLoading)
+            {
+                <button class="ghost-button" style="padding: 0.3rem 0.7rem;" aria-pressed="@(IsPaused ? "true" : "false")" @onclick="OnTogglePause">
+                    @(IsPaused ? "Resume feed" : "Pause feed")
+                </button>
+            }
+        </div>
     </header>
 
     <div class="feed-row" aria-hidden="true">
         <span class="mono-label">Device</span>
-        <span class="mono-label" style="text-align: right;">Value</span>
-        <span class="mono-label" style="text-align: right;">Time</span>
+        <span class="mono-label" style="text-align: right;">Reading</span>
+        <span class="mono-label" style="text-align: right;">When</span>
     </div>
 
     <div class="feed-scroll">
@@ -25,22 +41,38 @@
         {
             <div class="empty-state" role="status">Opening telemetry stream...</div>
         }
+        else if (Sensors.Count == 0)
+        {
+            <div class="empty-state">
+                <span>No sensors yet. <a class="inline-link" href="dashboard">Load demo sensors on the Sensors page</a> and their readings will stream in here.</span>
+            </div>
+        }
         else if (recentReadings.Count == 0)
         {
             <div class="empty-state">
-                <span>No telemetry yet. Seed sensors from the <a class="accent-text" href="dashboard">ingestion dashboard</a> and readings will stream in here.</span>
+                <span>
+                    Your @Sensors.Count sensors have not reported yet. New readings arrive every 4-12 seconds.
+                    If nothing appears, check that live data is running on the <a class="inline-link" href="dashboard">Sensors page</a>.
+                </span>
             </div>
         }
 
-        @foreach (var (sensorId, mac, reading) in recentReadings)
+        @foreach (var (sensor, reading) in recentReadings)
         {
-            var rowId = $"{sensorId}-{reading.Timestamp.Ticks}";
-            var critical = reading.Value > 90 || reading.Value < 10 ? "critical" : "";
+            var rowId = $"{sensor.Id}-{reading.Timestamp.Ticks}";
+            var status = SensorReadingInfo.GetStatus(reading.Value);
+            var statusClass = status == ReadingStatus.Normal ? "" : status.ToString().ToLowerInvariant();
             var entered = NewReadingIds.Contains(rowId) ? "entered" : "";
-            <div class="feed-row @critical @entered" @key="rowId">
-                <span class="feed-row-mac">@mac</span>
-                <span class="feed-row-value @critical">@reading.Value.ToString("F2")@(critical == "critical" ? " CRIT" : "")</span>
-                <span class="feed-row-time">@reading.Timestamp.ToString("HH:mm:ss")</span>
+            <div class="feed-row @statusClass @entered" @key="rowId">
+                <span class="feed-row-device">
+                    <span class="feed-row-mac">@sensor.MacAddress<SourceTag Source="sensor.Source" /></span>
+                    <span class="feed-row-sub">@sensor.Location - @SensorReadingInfo.Describe(sensor.Category)</span>
+                </span>
+                <span class="feed-row-reading">
+                    <span class="feed-row-value @statusClass">@SensorReadingInfo.Format(reading.Value, sensor.Category)</span>
+                    <StatusPill Status="status" />
+                </span>
+                <span class="feed-row-time" title="@TimeDisplay.Full(reading.Timestamp)">@TimeDisplay.Relative(reading.Timestamp)</span>
             </div>
         }
     </div>
@@ -50,4 +82,7 @@
     [Parameter] public IReadOnlyList<SensorProfile> Sensors { get; set; } = Array.Empty<SensorProfile>();
     [Parameter] public HashSet<string> NewReadingIds { get; set; } = new();
     [Parameter] public bool IsLoading { get; set; }
+    [Parameter] public bool IsPaused { get; set; }
+    [Parameter] public int PendingCount { get; set; }
+    [Parameter] public EventCallback OnTogglePause { get; set; }
 }

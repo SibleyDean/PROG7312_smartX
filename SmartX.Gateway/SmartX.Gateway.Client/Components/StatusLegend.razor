@@ -1,0 +1,28 @@
+@using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
+
+<details class="legend">
+    <summary>What do these mean?</summary>
+    <div class="legend-body">
+        <div>
+            <span class="mono-label">Reading status</span>
+            <dl>
+                @foreach (var status in Enum.GetValues<ReadingStatus>())
+                {
+                    <dt><StatusPill Status="status" ShowNormal="true" /></dt>
+                    <dd>@SensorReadingInfo.Explain(status)</dd>
+                }
+            </dl>
+        </div>
+        <div>
+            <span class="mono-label">Sensor types</span>
+            <dl>
+                @foreach (var category in Enum.GetValues<SensorCategory>())
+                {
+                    <dt><span class="category-badge">@category</span> @SensorReadingInfo.Describe(category) (@SensorReadingInfo.Unit(category))</dt>
+                    <dd>@SensorReadingInfo.Explain(category)</dd>
+                }
+            </dl>
+        </div>
+    </div>
+</details>

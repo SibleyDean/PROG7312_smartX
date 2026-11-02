@@ -1,0 +1,109 @@
+@using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
+
+@{
+    var gateway = Views.FirstOrDefault(v => v.IsGateway);
+    var routers = Views.Where(v => v.IsRouter).OrderBy(v => FactoryAreas.IndexOf(v.Node.Area)).ToList();
+    var sensorsByRouter = Views.Where(v => v.IsSensor).GroupBy(v => v.Node.ParentMac ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(g => g.Key, g => g.OrderBy(v => v.Name).ToList(), StringComparer.OrdinalIgnoreCase);
+    var shown = 0;
+}
+
+<div class="topology-list" aria-label="Network as a list">
+    @if (gateway is not null)
+    {
+        <div class="tree-row">
+            @Row(gateway, 0)
+        </div>
+    }
+
+    <ul class="tree-level">
+        @foreach (var router in routers)
+        {
+            var children = sensorsByRouter.TryGetValue(router.Mac, out var list) ? list.Where(c => !c.IsDimmed).ToList() : [];
+            if (router.IsDimmed && children.Count == 0)
+            {
+                continue;
+            }
+
+            shown += children.Count + 1;
+            var expanded = !CollapsedAreas.Contains(router.Node.Area);
+            var groupId = $"area-{FactoryAreas.IndexOf(router.Node.Area)}";
+            <li @key="router.Mac">
+                <div class="tree-row">
+                    <button class="tree-toggle" aria-expanded="@(expanded ? "true" : "false")" aria-controls="@groupId"
+                            aria-label="@(expanded ? "Collapse" : "Expand") @router.Node.Area" @onclick="() => OnToggleArea.InvokeAsync(router.Node.Area)">
+                        <span aria-hidden="true">@(expanded ? "▾" : "▸")</span>
+                    </button>
+                    @Row(router, 1)
+                </div>
+                @if (expanded)
+                {
+                    <ul class="tree-level" id="@groupId">
+                        @foreach (var sensor in children)
+                        {
+                            <li class="tree-row tree-leaf" @key="sensor.Mac">@Row(sensor, 2)</li>
+                        }
+                        @if (children.Count == 0)
+                        {
+                            <li class="hint-text tree-leaf">No sensors @(Filtering ? "match here" : "attached yet").</li>
+                        }
+                    </ul>
+                }
+            </li>
+        }
+    </ul>
+
+    @if (shown == 0 && Filtering)
+    {
+        <div class="empty-state">Nothing matches the search or the problems-only filter. Clear them to see the whole network.</div>
+    }
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<TopologyNodeView> Views { get; set; } = Array.Empty<TopologyNodeView>();
+    [Parameter] public string? SelectedMac { get; set; }
+    [Parameter] public IReadOnlySet<string> CollapsedAreas { get; set; } = new HashSet<string>();
+    [Parameter] public bool Filtering { get; set; }
+    [Parameter] public EventCallback<string> OnSelect { get; set; }
+    [Parameter] public EventCallback<string> OnToggleArea { get; set; }
+
+    private RenderFragment Row(TopologyNodeView view, int depth) =>
+        @<button class="tree-node @(string.Equals(view.Mac, SelectedMac, StringComparison.OrdinalIgnoreCase) ? "selected" : "") @(view.IsMatch ? "match" : "") @(view.IsInvalid ? "invalid" : "")"
+                 aria-pressed="@(string.Equals(view.Mac, SelectedMac, StringComparison.OrdinalIgnoreCase) ? "true" : "false")"
+                 title="@view.Description" @onclick="() => OnSelect.InvokeAsync(view.Mac)">
+            <span class="tree-name">
+                <span class="tree-title">@view.Name</span>
+                @if (view.IsSensor)
+                {
+                    <SourceTag Source="view.Node.Source" />
+                }
+                <span class="feed-row-sub">
+                    @view.Mac
+                    @if (view.IsSensor && view.Node.Category is SensorCategory category)
+                    {
+                        <text> &middot; @SensorReadingInfo.Describe(category)</text>
+                        @if (view.Node.LatestValue is double value)
+                        {
+                            <text> &middot; @SensorReadingInfo.Format(value, category)</text>
+                        }
+                    }
+                    @if (view.Node.IsRerouted)
+                    {
+                        <text> &middot; Rerouted</text>
+                    }
+                </span>
+            </span>
+            <span class="tree-status">
+                <NodeStatePill State="view.State" Alert="view.Alert" />
+                @if (view.IssuesDownstream > 0)
+                {
+                    <span class="mono-label critical-text">@TopologyView.IssuesText(view.IssuesDownstream)</span>
+                }
+                @if (view.IsInvalid)
+                {
+                    <span class="mono-label critical-text">Failed validation</span>
+                }
+            </span>
+        </button>;
+}

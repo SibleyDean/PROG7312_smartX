@@ -1,34 +1,62 @@
 @rendermode InteractiveWebAssembly
 @page "/dashboard"
+@implements IDisposable
 @using SmartX.Gateway.Shared.Models
+@using SmartX.Gateway.Shared.Services
 @using System.Net.Http.Json
+@using SmartX.Gateway.Client.Components
 @inject HttpClient Http
 
-<PageTitle>Smart-X | Ingestion</PageTitle>
+<PageTitle>Smart-X | Sensors</PageTitle>
 
 <div class="section">
     <div class="panel-header">
         <div>
-            <h1>Telemetry Dashboard</h1>
-            <p>Manage sensor profiles and monitor real-time ingestion.</p>
+            <h1>Sensors</h1>
+            <p>Every registered sensor with its latest reading and status. Select a sensor to see its recent history.</p>
         </div>
-        <div class="filter-chips">
-            <button class="ghost-button" @onclick="LoadSensors">Refresh</button>
-            @if (sensors is { Count: > 0 })
-            {
-                <button class="accent-button" @onclick="SeedData">Seed 10 Mock Sensors</button>
-            }
+        <div class="filter-chips" style="align-items: center;">
+            <button class="ghost-button" disabled="@_isRefreshing" @onclick="LoadSensors">@(_isRefreshing ? "Refreshing..." : "Refresh")</button>
+            <label class="toggle">
+                <input type="checkbox" checked="@_autoRefresh" @onchange="ToggleAutoRefresh" />
+                Auto-refresh (5s)
+            </label>
+            <button class="accent-button" disabled="@_isSeeding" @onclick="SeedData">@(_isSeeding ? "Loading..." : "Load 10 demo sensors")</button>
         </div>
     </div>
 
+    <div class="refresh-status" role="status">
+        @if (_refreshFailed)
+        {
+            <span class="critical-text">Refresh failed - gateway unreachable</span>
+            @if (_lastUpdatedUtc is DateTime previous)
+            {
+                <span> (showing data from @TimeDisplay.Clock(previous))</span>
+            }
+        }
+        else if (_lastUpdatedUtc is DateTime updated)
+        {
+            <span>Updated @TimeDisplay.Clock(updated)</span>
+        }
+    </div>
+
+    <SimulationControls SensorCount="@(sensors?.Count ?? 0)" OnCleared="LoadSensors" />
+
     @if (sensors == null)
     {
-        <div class="panel" aria-busy="true">
+        <div class="panel" aria-busy="@(_refreshFailed ? "false" : "true")">
             <header class="panel-header">
                 <h3>Sensor Registry</h3>
-                <span class="mono-label">Loading</span>
+                <span class="mono-label">@(_refreshFailed ? "Offline" : "Loading")</span>
             </header>
-            <div class="empty-state" role="status">Fetching sensor registry...</div>
+            @if (_refreshFailed)
+            {
+                <div class="empty-state">The gateway could not be reached. Check that it is running, then press Refresh.</div>
+            }
+            else
+            {
+                <div class="empty-state" role="status">Fetching sensor registry...</div>
+            }
         </div>
     }
     else if (!sensors.Any())
@@ -38,38 +66,90 @@
                 <h3>Sensor Registry</h3>
                 <span class="mono-label">0 sensors</span>
             </header>
-            <div class="empty-state">No sensors registered. Seed ten mock sensors to fill the registry and start generating telemetry for the command stream.</div>
+            <div class="empty-state">No sensors yet. Load 10 demo sensors to fill the registry and start live readings for the Command Stream.</div>
             <div>
-                <button class="accent-button" @onclick="SeedData">Seed 10 Mock Sensors</button>
+                <button class="accent-button" disabled="@_isSeeding" @onclick="SeedData">Load 10 demo sensors</button>
             </div>
         </div>
     }
     else
     {
+        var visible = VisibleSensors;
+        var selected = SelectedSensor;
+
+        if (!sensors.Any(s => s.Source != SensorSource.Mesh))
+        {
+            <div class="panel" style="margin-bottom: 1.5rem;">
+                <div class="sim-row">
+                    <p class="hint-text">
+                        Only the @sensors.Count mesh network sensors are registered. Load demo sensors to see a busier factory;
+                        they join the mesh router for their area on the Topology map.
+                    </p>
+                    <button class="accent-button" disabled="@_isSeeding" @onclick="SeedData">Load 10 demo sensors</button>
+                </div>
+            </div>
+        }
+
         <div class="command-layout">
             <div class="panel" aria-labelledby="registry-title">
                 <header class="panel-header">
                     <h3 id="registry-title">Sensor Registry</h3>
-                    <span class="mono-label">@sensors.Count sensors</span>
+                    <span class="mono-label">@(visible.Count == sensors.Count ? $"{sensors.Count} sensors" : $"{visible.Count} of {sensors.Count} sensors")</span>
                 </header>
-                <div class="data-grid">
-                    <div class="data-grid-header">
-                        <span>MAC Address</span>
-                        <span>Location</span>
-                        <span>Category</span>
-                        <span>Points</span>
-                        <span>Detail</span>
+
+                <div class="toolbar">
+                    <div class="command-field">
+                        <label class="mono-label" for="sensor-search">Search</label>
+                        <input id="sensor-search" class="command-input" type="search" placeholder="e.g. Boiler, Line 2, 1B:44:A3"
+                               @bind="_search" @bind:event="oninput" />
+                    </div>
+                    <div class="command-field">
+                        <label class="mono-label" for="category-filter">Category</label>
+                        <select id="category-filter" class="command-select" @bind="_categoryFilter">
+                            <option value="">All categories</option>
+                            @foreach (var category in Enum.GetValues<SensorCategory>())
+                            {
+                                <option value="@category">@category (@SensorReadingInfo.Describe(category))</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+
+                <div class="data-grid sensor-grid" role="table" aria-label="Sensor registry" aria-rowcount="@(visible.Count + 1)">
+                    <div class="data-grid-header" role="row">
+                        @SortHeader("MAC Address", SortColumn.Mac)
+                        @SortHeader("Location", SortColumn.Location)
+                        @SortHeader("Category", SortColumn.Category)
+                        @SortHeader("Latest", SortColumn.Latest)
+                        @SortHeader("Status", SortColumn.Status)
+                        <span role="columnheader">Detail</span>
                     </div>
 
-                    @foreach (var sensor in sensors)
+                    @if (visible.Count == 0)
                     {
-                        <div class="data-grid-row">
-                            <span class="data-cell-mac @(selectedSensor?.Id == sensor.Id ? "accent-text" : "")">@sensor.MacAddress</span>
-                            <span>@sensor.Location</span>
-                            <span><span class="category-badge">@sensor.Category</span></span>
-                            <span class="data-cell-value">@sensor.HistoricalTelemetry.Count</span>
+                        <div class="empty-state">
                             <span>
-                                <button class="ghost-button" @onclick="() => ViewDetails(sensor.Id)">View</button>
+                                No sensors match your search or category.
+                                <button class="ghost-button" @onclick="ClearFilters">Clear search and filter</button>
+                            </span>
+                        </div>
+                    }
+
+                    @foreach (var sensor in visible)
+                    {
+                        var latest = Latest(sensor);
+                        var isSelected = selected?.Id == sensor.Id;
+                        <div class="data-grid-row @(isSelected ? "selected" : "")" role="row" @key="sensor.Id">
+                            <span role="cell" class="data-cell-mac @(isSelected ? "accent-text" : "")">@sensor.MacAddress<SourceTag Source="sensor.Source" /></span>
+                            <span role="cell">@sensor.Location</span>
+                            <span role="cell"><span class="category-badge" title="@SensorReadingInfo.Describe(sensor.Category)">@sensor.Category</span></span>
+                            <span role="cell" class="data-cell-value" title="@ReadingCountText(sensor)">
+                                @(latest is null ? "--" : SensorReadingInfo.Format(latest.Value, sensor.Category))
+                            </span>
+                            <span role="cell"><StatusPill Status="@(latest is null ? null : SensorReadingInfo.GetStatus(latest.Value))" ShowNormal="true" /></span>
+                            <span role="cell">
+                                <button class="ghost-button" aria-pressed="@(isSelected ? "true" : "false")" aria-label="View history for @sensor.MacAddress"
+                                        @onclick="() => ViewDetails(sensor.Id)">@(isSelected ? "Viewing" : "View")</button>
                             </span>
                         </div>
                     }
@@ -77,27 +157,34 @@
             </div>
 
             <div class="insights-list">
-                @if (selectedSensor != null)
+                @if (selected != null)
                 {
-                    <div class="panel" aria-labelledby="detail-title" @key="selectedSensor.Id">
+                    var recent = selected.HistoricalTelemetry.OrderBy(p => p.Timestamp).TakeLast(30).ToList();
+                    <div class="panel" aria-labelledby="detail-title" @key="selected.Id">
                         <header class="panel-header">
-                            <h3 id="detail-title">@selectedSensor.MacAddress</h3>
-                            <button class="ghost-button" @onclick="() => selectedSensor = null">Close</button>
+                            <div class="detail-heading">
+                                <h3 id="detail-title">@SensorReadingInfo.Describe(selected.Category) - @selected.Location</h3>
+                                <span class="mono-label">@selected.MacAddress &middot; @selected.Category &middot; @SensorReadingInfo.Unit(selected.Category)</span>
+                            </div>
+                            <button class="ghost-button" @onclick="() => _selectedSensorId = null">Close</button>
                         </header>
-                        <span class="mono-label">Last 10 readings</span>
-                        @if (selectedSensor.HistoricalTelemetry.Count == 0)
+
+                        @if (selected.HistoricalTelemetry.Count == 0)
                         {
-                            <div class="empty-state">No readings recorded for this sensor yet.</div>
+                            <div class="empty-state">No readings yet. New readings arrive every 4-12 seconds while live data is running.</div>
                         }
                         else
                         {
+                            <Sparkline Readings="recent" Category="selected.Category" />
+                            <span class="mono-label">Last 10 readings</span>
                             <div class="feed-scroll">
-                                @foreach (var reading in selectedSensor.HistoricalTelemetry.OrderByDescending(p => p.Timestamp).Take(10))
+                                @foreach (var reading in recent.AsEnumerable().Reverse().Take(10))
                                 {
-                                    <div class="feed-row">
-                                        <span class="feed-row-time" style="text-align: left;">@reading.Timestamp.ToString("HH:mm:ss")</span>
-                                        <span></span>
-                                        <span class="feed-row-value">@reading.Value.ToString("F2")</span>
+                                    var status = SensorReadingInfo.GetStatus(reading.Value);
+                                    <div class="feed-row @(status == ReadingStatus.Normal ? "" : status.ToString().ToLowerInvariant())">
+                                        <span class="feed-row-time" style="text-align: left;" title="@TimeDisplay.Full(reading.Timestamp)">@TimeDisplay.Clock(reading.Timestamp)</span>
+                                        <span><StatusPill Status="status" ShowNormal="true" /></span>
+                                        <span class="feed-row-value">@SensorReadingInfo.Format(reading.Value, selected.Category)</span>
                                     </div>
                                 }
                             </div>
@@ -125,45 +212,138 @@
                         {
                             <div class="feed-row">
                                 <span class="feed-row-mac">@category</span>
-                                <span></span>
+                                <span class="feed-row-sub">@SensorReadingInfo.Describe(category)</span>
                                 <span class="feed-row-value">@sensors.Count(s => s.Category == category)</span>
                             </div>
                         }
                     </div>
                 </div>
+
+                <StatusLegend />
             </div>
         </div>
     }
 </div>
 
 @code {
+    private enum SortColumn { Mac, Location, Category, Latest, Status }
+
     private List<SensorProfile>? sensors;
-    private SensorProfile? selectedSensor;
+    private Guid? _selectedSensorId;
+    private string _search = string.Empty;
+    private string _categoryFilter = string.Empty;
+
+    // Problems first by default, so an operator sees what needs attention without sorting.
+    private SortColumn _sortColumn = SortColumn.Status;
+    private bool _sortDescending = true;
+
+    private bool _isRefreshing;
+    private bool _refreshQueued;
+    private bool _refreshFailed;
+    private bool _isSeeding;
+    private DateTime? _lastUpdatedUtc;
+    private bool _autoRefresh;
+    private System.Threading.Timer? _autoRefreshTimer;
+
+    // Re-resolved from every fresh list, so a refresh keeps the open detail panel on the same sensor.
+    private SensorProfile? SelectedSensor => sensors?.FirstOrDefault(s => s.Id == _selectedSensorId);
+
+    private List<SensorProfile> VisibleSensors
+    {
+        get
+        {
+            var filtered = (sensors ?? new())
+                .Where(s => SensorSearch.Matches(s, _search))
+                .Where(s => _categoryFilter.Length == 0 || s.Category.ToString() == _categoryFilter);
+
+            var ordered = _sortColumn switch
+            {
+                SortColumn.Mac => Order(filtered, s => s.MacAddress),
+                SortColumn.Location => Order(filtered, s => s.Location),
+                SortColumn.Category => Order(filtered, s => s.Category.ToString()),
+                SortColumn.Latest => Order(filtered, s => Latest(s)?.Value ?? double.MinValue),
+                _ => Order(filtered, s => StatusRank(s))
+            };
+
+            return ordered.ThenBy(s => s.MacAddress, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+    }
+
+    private IOrderedEnumerable<SensorProfile> Order<TKey>(IEnumerable<SensorProfile> source, Func<SensorProfile, TKey> key) =>
+        _sortDescending ? source.OrderByDescending(key) : source.OrderBy(key);
+
+    private RenderFragment SortHeader(string label, SortColumn column) =>
+        @<span role="columnheader" aria-sort="@(_sortColumn == column ? (_sortDescending ? "descending" : "ascending") : "none")">
+            <button class="sort-button" @onclick="() => SortBy(column)">
+                @label
+                <span class="sort-arrow" aria-hidden="true">@(_sortColumn == column ? (_sortDescending ? "▼" : "▲") : "↕")</span>
+            </button>
+        </span>;
 
     protected override async Task OnInitializedAsync()
     {
         await LoadSensors();
     }
 
-    private async Task LoadSensors()
+    private void SortBy(SortColumn column)
     {
+        if (_sortColumn == column)
+        {
+            _sortDescending = !_sortDescending;
+            return;
+        }
+
+        _sortColumn = column;
+        _sortDescending = column is SortColumn.Status or SortColumn.Latest;
+    }
+
+    private void ClearFilters()
+    {
+        _search = string.Empty;
+        _categoryFilter = string.Empty;
+    }
+
+    // A refresh requested while one is in flight (after seeding or clearing, say) runs once more as soon as it finishes,
+    // so the page never settles on data fetched before the change.
+    public async Task LoadSensors()
+    {
+        if (_isRefreshing)
+        {
+            _refreshQueued = true;
+            return;
+        }
+
+        _isRefreshing = true;
+
         try
         {
-            var result = await Http.GetFromJsonAsync<List<SensorProfile>>("api/sensors");
-            if (result != null)
+            do
             {
-                sensors = result;
-                selectedSensor = null;
+                _refreshQueued = false;
+
+                try
+                {
+                    sensors = await Http.GetFromJsonAsync<List<SensorProfile>>("api/sensors") ?? new();
+                    _lastUpdatedUtc = DateTime.UtcNow;
+                    _refreshFailed = false;
+                }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+                {
+                    _refreshFailed = true;
+                }
             }
+            while (_refreshQueued);
         }
-        catch (Exception ex)
+        finally
         {
-            Console.WriteLine($"Error loading sensors: {ex.Message}");
+            _isRefreshing = false;
         }
     }
 
     private async Task SeedData()
     {
+        _isSeeding = true;
+
         try
         {
             var response = await Http.PostAsync("api/sensors/seed/10", null);
@@ -172,14 +352,65 @@
                 await LoadSensors();
             }
         }
-        catch (Exception ex)
+        catch (HttpRequestException)
         {
-            Console.WriteLine($"Error seeding data: {ex.Message}");
+            _refreshFailed = true;
         }
+        finally
+        {
+            _isSeeding = false;
+        }
+    }
+
+    private void ToggleAutoRefresh(ChangeEventArgs e)
+    {
+        _autoRefresh = e.Value is true;
+        _autoRefreshTimer?.Dispose();
+        _autoRefreshTimer = null;
+
+        // Timers only make sense in the live WASM instance, never during pre-render.
+        if (_autoRefresh && OperatingSystem.IsBrowser())
+        {
+            _autoRefreshTimer = new System.Threading.Timer(async _ => await AutoRefreshAsync(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private async Task AutoRefreshAsync()
+    {
+        await InvokeAsync(async () =>
+        {
+            if (_autoRefreshTimer is null)
+            {
+                return;
+            }
+
+            await LoadSensors();
+            StateHasChanged();
+        });
     }
 
     private void ViewDetails(Guid sensorId)
     {
-        selectedSensor = sensors?.FirstOrDefault(s => s.Id == sensorId);
+        _selectedSensorId = sensorId;
+    }
+
+    private static TelemetryReading<double>? Latest(SensorProfile sensor) => sensor.HistoricalTelemetry.MaxBy(r => r.Timestamp);
+
+    private static int StatusRank(SensorProfile sensor) => Latest(sensor) is { } latest
+        ? SensorReadingInfo.GetStatus(latest.Value) switch
+        {
+            ReadingStatus.Critical => 3,
+            ReadingStatus.Warning => 2,
+            _ => 1
+        }
+        : 0;
+
+    private static string ReadingCountText(SensorProfile sensor) =>
+        sensor.HistoricalTelemetry.Count == 1 ? "1 reading recorded" : $"{sensor.HistoricalTelemetry.Count} readings recorded";
+
+    public void Dispose()
+    {
+        _autoRefreshTimer?.Dispose();
+        _autoRefreshTimer = null;
     }
 }

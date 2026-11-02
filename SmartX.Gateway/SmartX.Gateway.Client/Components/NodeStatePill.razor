@@ -1,0 +1,36 @@
+@using SmartX.Gateway.Shared.Services
+
+@switch (State)
+{
+    case NodeState.Normal:
+        <StatusPill Status="ReadingStatus.Normal" ShowNormal="true" />
+        break;
+    case NodeState.Warning:
+        <StatusPill Status="ReadingStatus.Warning" />
+        break;
+    case NodeState.Critical:
+        <StatusPill Status="ReadingStatus.Critical" />
+        break;
+    case NodeState.NoData:
+        <StatusPill ShowNormal="true" />
+        break;
+    case NodeState.Online:
+        <span class="status-pill normal" title="Online and connected to the gateway.">Online</span>
+        break;
+    case NodeState.Offline:
+        <span class="status-pill offline" title="Taken offline by a simulated failure; it sends no readings.">Offline</span>
+        break;
+    case NodeState.NoRoute:
+        <span class="status-pill noroute" title="Online, but every path to the gateway runs through an offline node, so its readings cannot arrive.">No route</span>
+        break;
+}
+
+@if (Alert is not null)
+{
+    <span class="alert-badge" title="Open @(Alert.Priority == 1 ? "critical" : "warning") alert">▲ Alert</span>
+}
+
+@code {
+    [Parameter] public NodeState State { get; set; }
+    [Parameter] public SmartX.Gateway.Shared.Models.AlertDetail? Alert { get; set; }
+}
